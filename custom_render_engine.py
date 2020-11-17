@@ -9,13 +9,9 @@ import weakref
 from mathutils import Vector
 
 # connect to blender connect if available
-from .utils import IsBConnectAddonAvailable, execution_queue, vec2dict, matrix2dict, PingForRuntime
+from .utils import execution_queue, vec2dict, matrix2dict, PingForRuntime
 
-BCONNECT_AVAILABLE = IsBConnectAddonAvailable()
-
-if BCONNECT_AVAILABLE:
-    import addon_blender_connect
-    from addon_blender_connect.BConnectNetwork import Publish,StartNetwork,NetworkRunning,AddListener, GetSessionId
+from .addon_blender_connect.BConnectNetwork import Publish,StartNetwork,NetworkRunning,AddListener, GetSessionId
 
 class ViewRenderer:
     def __init__(self,id,topic,renderengine):
@@ -101,10 +97,10 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
         AddListener("runtime",self.OnRuntimeMessage)     
 
     def OnRuntimeMessage(self,topic,subtype,meta,data):
-        print("##runtime mesg %s/%s" % (topic,subtype) )
+        #print("##runtime mesg %s/%s" % (topic,subtype) )
         def QueuedExecution():
-            print("FORTY:")
-            print("##runtime mesg %s/%s" % (topic,subtype) )
+            #print("FORTY:")
+            #print("##runtime mesg %s/%s" % (topic,subtype) )
 
             if topic == "runtime" and subtype == "hello":
                 print("FORCE UPDATE  FORCE UPDATE  FORCE UPDATE  FORCE UPDATE  FORCE UPDATE  FORCE UPDATE  FORCE UPDATE  ")

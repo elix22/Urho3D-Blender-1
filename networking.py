@@ -1,13 +1,19 @@
 import bpy
 
-from .utils import IsBConnectAddonAvailable, execution_queue, set_found_blender_runtime,PingData
+from .utils import execution_queue, set_found_blender_runtime,PingData
 
-BCONNECT_AVAILABLE = IsBConnectAddonAvailable()
+from .addon_blender_connect.BConnectNetwork import Publish,StartNetwork,NetworkRunning,AddListener,GetSessionId
+print("BCONNECT AVAILABLE! Starting network")
 
-if BCONNECT_AVAILABLE:
-    import addon_blender_connect
-    from addon_blender_connect.BConnectNetwork import Publish,StartNetwork,NetworkRunning,AddListener,GetSessionId
-    print("BCONNECT AVAILABLE! Starting network")
+running = False
+
+def Start():
+    global running
+    if running:
+        print("Network already running")
+        return
+
+    running = True
     StartNetwork()
 
     def OnRuntimeMessage(topic,subtype,meta,data):
@@ -17,7 +23,7 @@ if BCONNECT_AVAILABLE:
             # if subtype == "component-update":
             #     print("Try to reload components: todo check if the current file is %s" % data)
             #     bpy.ops.nodetree.jsonload('EXEC_DEFAULT')
-            print("INCOMING %s - %s - %s - %s" % ( topic,subtype,meta,data ) )
+            #print("INCOMING %s - %s - %s - %s" % ( topic,subtype,meta,data ) )
             if topic=="runtime" and subtype=="pong":
                 set_found_blender_runtime(True)
                 PingData.ping_check_running = False
@@ -25,14 +31,6 @@ if BCONNECT_AVAILABLE:
         execution_queue.queue_action(QueuedExecution) 
 
     AddListener("runtime",OnRuntimeMessage)
-    
-
-else:
-    print("BCONNECT UNAVAILABLE")
-
-
-
-
 
 
    

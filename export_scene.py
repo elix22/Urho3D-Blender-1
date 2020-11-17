@@ -13,13 +13,11 @@ import os
 import logging
 import math
 
-jsonNodetreeAvailable = False
+jsonNodetreeAvailable = True
 log = logging.getLogger("ExportLogger")
 
-jsonNodetreeAvailable = "addon_jsonnodetree" in bpy.context.preferences.addons.keys()
-if jsonNodetreeAvailable:
-    from addon_jsonnodetree import JSONNodetree
-    from addon_jsonnodetree import JSONNodetreeUtils
+from .addon_jsonnodetree import JSONNodetree
+from .addon_jsonnodetree import JSONNodetreeUtils
 
 usedMaterialTrees = []
  
@@ -689,8 +687,6 @@ def ProcessNodetreeMaterials(mesh):
     return result
 
 def ProcessNodetreeMaterial(mesh,materialNT):
-    print("MaterialNodeTree %s is used!" % materialNT.name)
-
     # search for predef-material-node and use the material it defines
     for node in materialNT.nodes:
         if node.bl_idname=="urho3dmaterials__predefMaterialNode":

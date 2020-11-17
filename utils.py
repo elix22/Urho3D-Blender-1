@@ -20,28 +20,28 @@ from mathutils import Vector
 import traceback
 
 
-# -----------------------------------------
-# Check if json-nodetree-addon is available
-# -----------------------------------------
-def IsJsonNodeAddonAvailable():
-    #jsonNodetreeAvailable = False
-    #log = logging.getLogger("ExportLogger")
-    jsonNodetreeAvailable = "addon_jsonnodetree" in bpy.context.preferences.addons.keys()
-    return jsonNodetreeAvailable
+# # -----------------------------------------
+# # Check if json-nodetree-addon is available
+# # -----------------------------------------
+# def IsJsonNodeAddonAvailable():
+#     #jsonNodetreeAvailable = False
+#     #log = logging.getLogger("ExportLogger")
+#     jsonNodetreeAvailable = "addon_jsonnodetree" in bpy.context.preferences.addons.keys()
+#     return jsonNodetreeAvailable
 
-# -------------------------------------------
-# Check if blender-connect-addon is available
-# -------------------------------------------
-def IsBConnectAddonAvailable():
-    bconnectAvailable = "addon_blender_connect" in  bpy.context.preferences.addons.keys()
-    return bconnectAvailable    
+# # -------------------------------------------
+# # Check if blender-connect-addon is available
+# # -------------------------------------------
+# def IsBConnectAddonAvailable():
+#     bconnectAvailable = "addon_blender_connect" in  bpy.context.preferences.addons.keys()
+#     return bconnectAvailable    
 
 
-BCONNECT_AVAILABLE = IsBConnectAddonAvailable()
+# BCONNECT_AVAILABLE = IsBConnectAddonAvailable()
 
-if BCONNECT_AVAILABLE:
-    import addon_blender_connect
-    from addon_blender_connect.BConnectNetwork import Publish,StartNetwork,NetworkRunning,AddListener,GetSessionId
+# if BCONNECT_AVAILABLE:
+#     import addon_blender_connect
+#     from addon_blender_connect.BConnectNetwork import Publish,StartNetwork,NetworkRunning,AddListener,GetSessionId
 
 log = logging.getLogger("ExportLogger")
 
@@ -352,9 +352,9 @@ class ExecutionQueue:
         self.queue = Queue()
 
     def queue_action(self,action):
-        print("added queue function(THREAD:%s)" % current_thread().getName())        
+        #print("added queue function(THREAD:%s)" % current_thread().getName())        
         self.queue.put(action)
-        print("..done..")
+        #print("..done..")
 
     ## execute immediately if called from main-thread, otherwise queue it
     def execute_or_queue_action(self,action):
@@ -371,7 +371,7 @@ class ExecutionQueue:
     def flush_actions(self):
         #print("TRY TO FLUSH EXECUTION ACTIONS: empty?: %s" % self.queue.empty())
         while not self.queue.empty():
-            print("DO EXECUTION FUNCTION")
+            #print("DO EXECUTION FUNCTION")
             # get queued-action...
             action = self.queue.get()
             # ...and execute it
@@ -443,7 +443,7 @@ def PingForRuntime():
     PingData.ping_auto_timer = 10
 
     PingData.ping_check_running = True
-    print("Setted:%s" % PingData.ping_check_running)
+    #print("Setted:%s" % PingData.ping_check_running)
     PingData.ping_runtime_timer = 0
     PingData.ping_runtime_interval = 2
     PingData.ping_count = 0
