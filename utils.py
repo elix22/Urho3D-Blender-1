@@ -7,7 +7,7 @@
 
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
-import os
+import os,shutil
 import struct
 import array
 import logging
@@ -18,6 +18,7 @@ from threading import current_thread,main_thread
 from math import degrees
 from mathutils import Vector
 import traceback
+from .addon_jsonnodetree import JSONNodetree
 
 
 # # -----------------------------------------
@@ -234,8 +235,8 @@ def ensure_dir(file_path):
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-# Write XML to a text file
-def WriteXmlFile(xmlContent, filepath, fOptions):
+
+def WriteStringFile(stringContent, filepath, fOptions):
     try:
         ensure_dir(filepath)
         file = open(filepath, "w")
@@ -243,10 +244,16 @@ def WriteXmlFile(xmlContent, filepath, fOptions):
         log.error("Cannot open file {:s} {:s}".format(filepath, e))
         return
     try:
-        file.write(XmlToPrettyString(xmlContent))
+        file.write(stringContent)
     except Exception as e:
         log.error("Cannot write to file {:s} {:s}".format(filepath, e))
     file.close()
+
+
+# Write XML to a text file
+def WriteXmlFile(xmlContent, filepath, fOptions):
+    WriteStringFile(XmlToPrettyString(xmlContent),filepath,fOptions)
+
 
 
 #--------------------
@@ -322,7 +329,8 @@ def SDBMHash(key):
         hash = ord(key[i]) + (hash << 6) + (hash << 16) - hash
     return (hash & 0xFFFFFFFF)
 
-
+def CalcNodeHash(id):
+    return SDBMHash(id) % 10000000
 
 def getLodSetWithID(id,returnIdx=False):
     cnt=0
@@ -421,7 +429,6 @@ class PingData:
     ping_auto_timer = 0
 
 
-
 FOUND_RUNTIME = False
 
 def found_blender_runtime():
@@ -449,6 +456,176 @@ def PingForRuntime():
     PingData.ping_count = 0
     set_found_blender_runtime(False)
 
+def copy_file(from_filepath,to_folder,createFolderIfNotPresent=True):
+    if createFolderIfNotPresent:
+        from pathlib import Path
+        Path(to_folder).mkdir(parents=True, exist_ok=True)
+
+    shutil.copy(bpy.path.abspath(from_filepath), to_folder)
+
+    
+
+def PrepareSceneHeaderFile(scene=None):
+    # store object-data
+    object_data={}
+
+    def get_or_create_objdata(obj):
+        if obj in object_data:
+            return object_data[obj]
+        
+        obj_data={
+            "name" : obj.name
+        }
+        object_data[obj]=obj_data
+        return obj_data
+
+    if not scene:
+        scene = bpy.context.scene
+
+    scene_name = scene.name
+
+    all_objects={}
+
+    result={}
+    scenedata=result[scene_name]={}
+    objects     = scenedata["all_obj"]={}
+    empties     = scenedata["empties"]={}
+    collections = scenedata["collections"]={}
+    tags        = scenedata["tags"]={}
+    lights      = scenedata["lights"]={}
+    cameras     = scenedata["cameras"]={}
+    meshobj     = scenedata["mesh_objects"]={}
+
+    # build data-structure
+    for obj in scene.objects:
+        obj_data = get_or_create_objdata(obj)
+        obj_name = obj.name
+        obj_name = re.sub('[^\w_.)( -]', '_', obj_name).replace('.','_')
+        
+        objects[obj_name]=obj_data
+        all_objects[obj]=obj_data
+
+        if obj.type=="MESH":
+            meshobj[obj_name]=obj_data
+        elif obj.type=="LIGHT":
+            lights[obj_name]=obj_data
+        elif obj.type=="CAMERA":
+            cameras[obj_name]=obj_data
+        elif obj.type=="EMPTY":
+            empties[obj_name]=obj_data
+        else:
+            print("obj-type:%s not categorized" % obj.type)
+        
+        for col in obj.users_collection:
+            collection_name = col.name
+            if collection_name not in collections:
+                collections[collection_name]={}
+            collections[collection_name][obj_name]=obj_data
+
+        for userdata in obj.user_data:
+            if userdata.key=="tag":
+                tag = userdata.value
+                if tag not in tags:
+                    tags[tag]={}
+                tags[tag][obj_name]=obj_data
+        
+    return (result,all_objects)
 
 
+def PrepareGlobalHeader():
+    result={}
+    animations  = result["animations"]={}
+    scenes      = result["scenes"]={}
+    objects     = result["objects"]={}        
+    sounds      = result["sounds"]={}        
+    particles   = result["particles"]={}        
+    models      = result["models"]={}        
+    textures    = result["textures"]={}
+    textures["all"]={}
 
+    def PrepareDefault(globalDataName,bucket):
+        try:
+            for elem in JSONNodetree.globalData[globalDataName]:
+                res_path  = elem["name"]
+                name = bpy.path.basename(res_path)
+                name_normalized = re.sub('[_.)( -]', '_', name)
+                if name_normalized[0].isdigit():
+                    name_normalized = "_"+name_normalized
+
+                data = {
+                    "name" : os.path.splitext(name)[0],
+                    "path" : res_path
+                }
+
+                bucket[name_normalized]=data
+        except:
+            print("could not read animations")  
+
+    try:
+        for texture in JSONNodetree.globalData["textures"]:
+            tex_res_path  = texture["name"]
+            tex_name = bpy.path.basename(tex_res_path)
+            tex_name_normalized = re.sub('[_.)( -]', '_', tex_name)
+            folder = os.path.dirname(tex_res_path)
+
+            data = {
+                #"name" : os.path.splitext(tex_name)[0],
+                "path" : tex_res_path
+            }
+
+            textures["all"][tex_name_normalized]=data
+            current_dict=textures
+            skip=True # skip first
+            for f in folder.split('/'):
+                if skip:
+                    skip=False
+                    continue
+
+                if f not in current_dict:
+                    current_dict[f]={}
+                current_dict = current_dict[f]
+
+            if current_dict!=textures:
+                current_dict[tex_name_normalized]=data
+    except:
+        print("could not read textures")
+
+    PrepareDefault("animations",animations)
+    PrepareDefault("scenes",scenes)
+    PrepareDefault("objects",objects)
+    PrepareDefault("particles",particles)
+    PrepareDefault("sounds",sounds)
+    PrepareDefault("models",models)
+
+    return result
+
+
+def WriteSceneHeaderFile(topic,input,output_path):
+    def _WriteSceneHeader(input):
+        current_text=""
+        for key in input:
+            value=input[key]
+            if isinstance(value,dict):
+                namespace_name = re.sub('[_.\.)( -]', '_', key)
+                current_text+="namespace %s {\n%s\n}\n" % (namespace_name,_WriteSceneHeader(value))
+            elif isinstance(value,int):
+                current_text+="int %s=%s;\n" % (key,value)
+            elif isinstance(value,float):
+                current_text+="float %s=%sf;\n" % (key,value)
+            elif isinstance(value,str):
+                current_text+='const char* %s="%s";\n' % (key,value)
+            else:
+                print("unsupported type for %s[%s]:%s" % (key,value,type(value)))
+        return current_text
+
+    text="""
+#pragma once
+namespace res {
+namespace %s {
+    """ % topic
+
+    text += _WriteSceneHeader(input)
+    text+="}}"
+    
+    print(text)
+    WriteStringFile(text,output_path,None)

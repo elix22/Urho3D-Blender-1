@@ -5,12 +5,13 @@
 
 from .utils import PathType, GetFilepath, CheckFilepath, \
                    FloatToString, Vector3ToString, Vector4ToString, \
-                   WriteXmlFile, SDBMHash, getLodSetWithID, getObjectWithID
+                   WriteXmlFile,WriteStringFile, SDBMHash, getLodSetWithID, getObjectWithID,\
+                   PrepareSceneHeaderFile,PrepareGlobalHeader,WriteSceneHeaderFile
 from xml.etree import ElementTree as ET
 from mathutils import Vector, Quaternion, Matrix
-import bpy
+import bpy,copy
 import os
-import logging
+import logging,traceback
 import math
 
 jsonNodetreeAvailable = True
@@ -32,6 +33,7 @@ class SOptions:
         self.doCollectivePrefab = False
         self.doScenePrefab = False
         self.SceneCreateZone = False
+        self.ZoneTexture = "None"
         self.noPhysics = False
         self.individualPhysics = False
         self.individualPrefab_onlyRootObject = True
@@ -611,16 +613,16 @@ def AddGroupInstanceComponent(a,m,groupFilename,offset,modelNode):
     a["{:d}".format(m)].set("name", "groupFilename")
     a["{:d}".format(m)].set("value", groupFilename)
     
-    a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(attribID)], "attribute")
-    a["{:d}".format(m)].set("name", "groupOffset")
-    off = Vector3ToString(Vector( (offset.y,offset.z,offset.x) ))
-    print("EXPORT-OFFSET: %s : %s" % ( groupFilename,off ))
-    a["{:d}".format(m)].set("value", off )
+    # a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(attribID)], "attribute")
+    # a["{:d}".format(m)].set("name", "groupOffset")
+    # off = Vector3ToString(Vector( (offset.y,offset.z,offset.x) ))
+    # print("EXPORT-OFFSET: %s : %s" % ( groupFilename,off ))
+    # a["{:d}".format(m)].set("value", off )
     
     return m
 
 ## add userdata-attributes 
-def ExportUserdata(a,m,obj,modelNode,includeCollectionTags=True):
+def ExportUserdata(a,m,obj,modelNode,includeCollectionTags=True,fOptions=None):
     print("EXPORT USERDATA")
     attribID = m
     a["{:d}".format(m)] = ET.SubElement(a[modelNode], "attribute")
@@ -629,15 +631,64 @@ def ExportUserdata(a,m,obj,modelNode,includeCollectionTags=True):
 
     tags = []
 
+    def add_userdata(key,value,type="String"):
+        nonlocal m,a
+        a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(attribID)], "variant")
+        a["{:d}".format(m)].set("hash", str(SDBMHash(key)))
+        a["{:d}".format(m)].set("type", type)
+        a["{:d}".format(m)].set("value", value)
+        m += 1
+
     for ud in obj.user_data:
         if ud.key.lower() != "tag":
-            a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(attribID)], "variant")
-            a["{:d}".format(m)].set("hash", str(SDBMHash(ud.key)))
-            a["{:d}".format(m)].set("type", "String")
-            a["{:d}".format(m)].set("value", ud.value)
-            m += 1
+            add_userdata(ud.key,ud.value)
         else:
             tags.extend(ud.value.split(","))
+
+    animation_object = None
+
+    node_animation = False
+
+
+    if obj.parent and obj.parent.type=="ARMATURE" and obj.parent.animation_data:
+        animation_object = obj.parent
+    elif obj and obj.animation_data:
+        animation_object = obj
+        node_animation = True
+
+
+    if animation_object:
+        animdata = animation_object.animation_data
+        
+        if animdata.action:
+            action_name=animdata.action.name
+
+            filepath = GetFilepath(PathType.ANIMATIONS, action_name, fOptions)
+            animation_filename = filepath[1]
+            if node_animation:
+                add_userdata("__runtime_nodeanimation",animation_filename)
+                tags.append("__runtime_nodeanim")
+            else:
+                add_userdata("__runtime_animation",animation_filename)
+
+            current_time =  (bpy.context.scene.frame_current-1) / bpy.context.scene.render.fps
+            add_userdata("__runtime_animation_time",str(current_time),"Float")
+
+    if obj.type=="MESH" and obj.data.shape_keys:
+        result = ""
+        first=True
+        for block in obj.data.shape_keys.key_blocks:
+            if first or block.mute or block.value==0:
+                first=False
+                continue
+            
+            if result!="":
+                result+="|"
+            result+="%s~%s" %(block.name,block.value)
+
+        if result!="":
+            add_userdata("__runtime_shapekeys",result)
+
 
     if includeCollectionTags:
         print("INCLUDE COLTAGS")
@@ -729,10 +780,10 @@ def HasComponent(a,name):
 
 # Export scene and nodes
 def UrhoExportScene(context, uScene, sOptions, fOptions):
-    usedMaterialTrees.clear();
+    usedMaterialTrees.clear()
 
     blenderScene = bpy.data.scenes[uScene.blenderSceneName]
-    
+    urho_settings = blenderScene.urho_exportsettings
     '''
     # Re-order meshes
     orderedModelsList = []
@@ -744,10 +795,25 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
     uScene.modelsList = orderedModelsList
     '''
 
+    fileid = bpy.data.worlds[0].global_settings.file_id
+    scene_hash = SDBMHash(bpy.context.scene.name)%100
+
+    k = fileid * 1000000 + scene_hash * 10000
+
+
     a = {}
-    k = 0x1000000   # node ID
+    #k = 0x1000000   # node ID
     compoID = k     # component ID
     m = 0           # internal counter
+
+    def add_attributes(parent,attributes=[]):
+        nonlocal m
+
+        for key in attributes:
+            a["{:d}".format(m)] = ET.SubElement(parent, "attribute")
+            a["{:d}".format(m)].set("name", str(key))
+            a["{:d}".format(m)].set("value", str(attributes[key]))
+            m += 1
 
     def add_component(parent,componentType,attributes=[]):
         nonlocal compoID
@@ -768,47 +834,23 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
             m += 1
         compoID += 1
 
+    if urho_settings.generateSceneHeader:
+        header_data,header_objects = PrepareSceneHeaderFile(bpy.context.scene)
+        global_header_data = PrepareGlobalHeader()
+    
 
     # Create scene components
     if sOptions.doScenePrefab:
         sceneRoot = ET.Element('scene')
         sceneRoot.set("id", "1")
 
-        foundSceneNodeTree = False
-        try:
-#            print("SCENETREE CHECK: %s %s %s" % ( jsonNodetreeAvailable, str(blenderScene.nodetree is not None), blenderScene.nodetree.name)) 
-            if jsonNodetreeAvailable and blenderScene.nodetree:
-                # bypass nodeID and receive the new value
-                print("FOUND SCENE")
-                compoID = CreateNodeTreeXML(sceneRoot,blenderScene.nodetree,compoID)
-                foundSceneNodeTree = True
-        except Exception as e:
-            log.error("Cannot export scene nodetree {:s} " % str(e) )
-            log.critical("Couldn't export scene-nodetree. skipping nodetree and going on with default behaviour")
-            pass
-
-        if not foundSceneNodeTree:
-            add_component(sceneRoot,"Octree")
-            add_component(sceneRoot,"DebugRenderer")
-
-            # a["{:d}".format(m)] = ET.SubElement(sceneRoot, "component")
-            # a["{:d}".format(m)].set("type", "Octree")
-            # a["{:d}".format(m)].set("id", "1")
-
-            # a["{:d}".format(m+1)] = ET.SubElement(sceneRoot, "component")
-            # a["{:d}".format(m+1)].set("type", "DebugRenderer")
-            # a["{:d}".format(m+1)].set("id", "2")
-
-            # m += 2
-
-
-
-
-            if not sOptions.noPhysics:
-                a["{:d}".format(m)] = ET.SubElement(sceneRoot, "component")
-                a["{:d}".format(m)].set("type", "PhysicsWorld")
-                a["{:d}".format(m)].set("id", "4")
-                m += 1
+        add_component(sceneRoot,"Octree")
+        add_component(sceneRoot,"DebugRenderer")
+        if not sOptions.noPhysics:
+            a["{:d}".format(m)] = ET.SubElement(sceneRoot, "component")
+            a["{:d}".format(m)].set("type", "PhysicsWorld")
+            a["{:d}".format(m)].set("id", "4")
+            m += 1
 
         # Create Root node
         root = ET.SubElement(sceneRoot, "node")
@@ -821,16 +863,78 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
     a["{:d}".format(m)].set("name", "Name")
     a["{:d}".format(m)].set("value", uScene.blenderSceneName)
 
-    if sOptions.SceneCreateZone:
-            zone_attrs = {}
-            zone_attrs["Bounding Box Min"]="-2000 -2000 -2000"
-            zone_attrs["Bounding Box Max"]="2000 2000 2000"
-            zone_attrs["Ambient Color"]="0.15 0.15 0.15 1"
-            zone_attrs["Fog Color"]="0.5 0.5 0.7 1"
-            zone_attrs["Fog Start"]=300
-            zone_attrs["Fog End"]=500
-            add_component(root,"Zone",zone_attrs)
+    foundSceneNodeTree = False
+    try:
+#            print("SCENETREE CHECK: %s %s %s" % ( jsonNodetreeAvailable, str(blenderScene.nodetree is not None), blenderScene.nodetree.name)) 
+        if jsonNodetreeAvailable and blenderScene.nodetree:
+            # bypass nodeID and receive the new value
+            print("FOUND SCENE")
+            compoID = CreateNodeTreeXML(root,blenderScene.nodetree,compoID)
+            foundSceneNodeTree = True
+    except Exception as e:
+        log.error("Cannot export scene nodetree {:s} " % str(e) )
+        log.critical("Couldn't export scene-nodetree. skipping nodetree and going on with default behaviour")
+        pass        
 
+
+    if sOptions.SceneCreateZone:
+        zone_attrs = {}
+        zone_attrs["Bounding Box Min"]="-2000 -2000 -2000"
+        zone_attrs["Bounding Box Max"]="2000 2000 2000"
+        zone_attrs["Ambient Color"]="0.15 0.15 0.15 1"
+        zone_attrs["Fog Color"]="0.5 0.5 0.7 1"
+        zone_attrs["Fog Start"]=300
+        zone_attrs["Fog End"]=500
+        if sOptions.ZoneTexture and sOptions.ZoneTexture!="None":
+            zone_attrs["Zone Texture"]=sOptions.ZoneTexture
+        add_component(root,"Zone",zone_attrs)
+
+    if urho_settings.sceneCreateSkybox and urho_settings.sceneSkyBoxCubeTexture:
+        skybox = a["__skybox"] = ET.SubElement(root, "node")
+        
+        # <attribute name="Is Enabled" value="true" />
+		# <attribute name="Name" value="Sky" />
+		# <attribute name="Tags" />
+		# <attribute name="Position" value="0 0 0" />
+		# <attribute name="Rotation" value="1 0 0 0" />
+		# <attribute name="Scale" value="1 1 1" />
+		# <attribute name="Variables" />
+        attrs={}
+        attrs["Is Enabled"]=True
+        attrs["Name"]="%sSkybox" % context.scene.name
+        add_attributes(skybox,attrs)
+
+        # <component type="Skybox" id="12">
+        # <component type="Skybox" id="12">
+		# 	<attribute name="Model" value="Model;Models/Sphere.mdl" />
+		# 	<attribute name="Material" value="Material;Materials/Skybox2.xml" />
+		# </component>
+        skybox_attrs = {}
+        skybox_attrs["Model"]="Model;Models/SkyboxSphere.mdl"
+        materialName = "Materials/_%s_Skybox.xml" % context.scene.name
+        skybox_attrs["Material"]="Material;%s" % materialName
+        add_component(skybox,"Skybox",skybox_attrs)            
+
+        _skyboxTechnique="DiffSkybox"
+        if urho_settings.sceneSkyBoxHDR:
+            _skyboxTechnique += "HDRScale"
+
+        skyboxMaterial="""
+<material>
+	<parameter name="MatDiffColor" value="1 1 1 1"/>
+	<parameter name="MatSpecColor" value="0 0 0 1"/>
+	<parameter name="MatEmissiveColor" value="0 0 0"/>
+	<parameter name="UOffset" value="1.0 0 0 0"/>
+	<parameter name="VOffset" value="0 1.0 0 0"/>
+	<texture name="%s" unit="diffuse"/>
+	<cull value="none"/>
+	<shadowcull value="ccw"/>
+	<fill value="solid"/>
+	<technique loddistance="0" name="Techniques/%s.xml" quality="0"/>
+</material>
+            """ % (urho_settings.sceneSkyBoxCubeTexture,_skyboxTechnique)
+        matPath = GetFilepath(PathType.MATERIALS, "_%s_Skybox"% context.scene.name, fOptions)
+        WriteStringFile(skyboxMaterial,matPath[0],fOptions)
 
   #  a["lightnode"] = ET.SubElement(root, "node")
 
@@ -845,6 +949,16 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
 #    a["{:d}".format(m+4)] = ET.SubElement(a["lightnode"], "attribute")
 #    a["{:d}".format(m+4)].set("name", "Rotation")
 #    a["{:d}".format(m+4)].set("value", "0.884784 0.399593 0.239756 -0")
+
+    attrs={
+        "RenderPath" : urho_settings.runtimeRenderPath,
+        "HDR" : urho_settings.runtimeUseHDR,
+        "Gamma" : urho_settings.runtimeUseGamma,
+        "Bloom" : urho_settings.runtimeUseBloom,
+        "FXAA2" : urho_settings.runtimeUseFXAA2,
+        "sRGB" : urho_settings.runtimeShowSRGB
+    }
+    add_component(root,"RenderData",attrs)
 
 
     # Create physics stuff for the root node
@@ -937,8 +1051,9 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
             if grpObj.type=="ARMATURE":
                 print("Found armature: adding children to group")
                 for child in grpObj.children:
-                    grpObjects.append(child)
-                    print("armature-child:%s" % child.name)
+                    if child not in grpObjects:
+                        grpObjects.append(child)
+                        print("armature-child:%s" % child.name)
                 continue
 
             if grpObj.name in groupObjMapping:
@@ -1009,16 +1124,18 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
         # Generate XML Content
         k += 1
         
+        # if in export only selected mode make sure those selections are put as root object
+        add_exception = obj.parent and urho_settings.source=="ONLY_SELECTED" and obj.parent not in bpy.context.selected_objects
 
         # Parenting: make sure parented objects are child of this in xml as well
-        print ( ("PARENT:%s type:%s") % (str(uSceneModel.parentObjectName),str(uSceneModel.type )))
-        if not isEmpty and uSceneModel.parentObjectName and (uSceneModel.parentObjectName in a):
+        print ( ("PARENT:%s type:%s") % (str(uSceneModel.parentObjectName),str(uSceneModel.type)))
+        if not add_exception and not isEmpty and uSceneModel.parentObjectName and (uSceneModel.parentObjectName in a):
             for usm in uScene.modelsList:
                 if usm.name == uSceneModel.parentObjectName:
                     a[modelNode] = ET.SubElement(a[usm.name], "node")
                     break
         else:
-            if not uSceneModel.parentObjectName:
+            if not uSceneModel.parentObjectName or add_exception:
                 a[modelNode] = ET.SubElement(root, "node")
                 parentObjects.append({'xml':a[modelNode],'uSceneModel':uSceneModel})
             else:
@@ -1039,12 +1156,12 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
                         offset = group.instance_offset # Vector((0,0,0)) # no offset in blender 2.8 anymore
 
                         a[groupName] = ET.Element('node')
-                        a["{:d}".format(m)] = ET.SubElement(a[groupName], "attribute")
-                        a["{:d}".format(m)].set("name", "Position")
-                        a["{:d}".format(m)].set("value", "%s %s %s" % ( offset.y,-offset.z, -offset.x ) )
-                        m += 1
+                        # a["{:d}".format(m)] = ET.SubElement(a[groupName], "attribute")
+                        # a["{:d}".format(m)].set("name", "Position")
+                        # a["{:d}".format(m)].set("value", "%s %s %s" % ( offset.y,-offset.z, -offset.x ) )
+                        # m += 1
 
-                        groups.append({'xml':a[groupName],'obj':obj,'group':group })
+                        
                         # apply group offset
                         #offset = group.dupli_offset
                         
@@ -1055,15 +1172,20 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
                         colInstPos = Vector( (modelPos.x + offset.y, modelPos.y - offset.z, modelPos.z - offset.x) )
                         print("NEW Collection Instance POS %s: " % ( colInstPos ))
                         uSceneModel.colInstPosition = colInstPos
-                        
+
+                        groups.append({'xml':a[groupName],'obj':obj,'group':group, 'instance_offset_delta' : (offset.y,-offset.z,-offset.x) })
                     
                     # create root for the group object
                     print("a[%s].append(a[%s]" %(groupName,modelNode))
-                    if a[modelNode] not in a[groupName]:
+                    if modelNode in a and a[modelNode] not in a[groupName]:
                         a[groupName].append(a[modelNode])
                 #a[modelNode] = ET.SubElement(a[groupName],'node') 
 
         a[modelNode].set("id", "{:d}".format(k))
+        
+        if urho_settings.generateSceneHeader:
+            header_obj_data = header_objects[obj]
+            header_obj_data["id"]=k
 
         a["{:d}".format(m)] = ET.SubElement(a[modelNode], "attribute")
         a["{:d}".format(m)].set("name", "Name")
@@ -1085,7 +1207,7 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
             m += 1
         
         if (sOptions.exportUserdata or sOptions.exportObjectCollectionAsTag) and obj:
-            m = ExportUserdata(a,m,obj,modelNode,sOptions.exportObjectCollectionAsTag)
+            m = ExportUserdata(a,m,obj,modelNode,sOptions.exportObjectCollectionAsTag,fOptions)
         
         if sOptions.exportGroupsAsObject and obj.instance_type == 'COLLECTION':
             grp = obj.instance_collection
@@ -1109,6 +1231,13 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
             a["{:d}".format(m)].set("value", currentModel)
             m += 1
 
+            if obj.hide_render:
+                a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(compID)], "attribute")
+                a["{:d}".format(m)].set("name", "Is Enabled")
+                a["{:d}".format(m)].set("value", "false")
+                m += 1
+
+
             a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(compID)], "attribute")
             a["{:d}".format(m)].set("name", "Material")
             currentMaterialValue = "Material" + materials
@@ -1127,7 +1256,13 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
                     a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(compID)], "attribute")
                     a["{:d}".format(m)].set("name", "Cast Shadows")
                     a["{:d}".format(m)].set("value", "true")
-                    m += 1    
+                    m += 1
+                else:
+                    a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(compID)], "attribute")
+                    a["{:d}".format(m)].set("name", "Cast Shadows")
+                    a["{:d}".format(m)].set("value", "false")
+                    m += 1
+
 
                 # if obj.receive_shadow:
                 #     a["{:d}".format(m)] = ET.SubElement(a["{:d}".format(compID)], "attribute")
@@ -1144,11 +1279,23 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
 
             finishedNodeTree = False
             try:
-                if jsonNodetreeAvailable and len(obj.nodetrees)>0:
+                if jsonNodetreeAvailable:
                     # keep track of already exported nodetrees to prevent one nodetree added multiple times
                     # TODO: prevent inconsistend data in the first place
                     handledNodetrees = []
                     
+                    # merge the nodetress on the armature on the mesh-object
+                    if obj.parent and obj.parent.type=="ARMATURE": 
+                        for nodetreeSlot in obj.parent.nodetrees:
+                            nt = nodetreeSlot.nodetreePointer
+                            if (nt not in handledNodetrees):
+                                compoID = CreateNodeTreeXML(a[modelNode],nt,compoID,currentModel,currentMaterialValue,xmlCurrentModelNode,modelNode)
+                                handledNodetrees.append(nt)
+                            else:
+                                # we already added this nodetree! nothing more to do
+                                pass
+
+
                     for nodetreeSlot in obj.nodetrees:
                         nt = nodetreeSlot.nodetreePointer
                         if (nt not in handledNodetrees):
@@ -1159,6 +1306,8 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
                             pass
                     finishedNodeTree = True
             except:
+                desired_trace = traceback.format_exc()
+                print("Unexpected error in jsonnodetree_register:", desired_trace)                
                 log.critical("Couldn't export nodetree. skipping nodetree and going on with default behaviour")
                 pass
 
@@ -1257,28 +1406,31 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
                     ldata = obj.data
                     light_attrs={}
                     light_attrs["Is Enabled"]="true"
+                    light_attrs["Use Physical Values"]=ldata.use_pbr
+                    
+                    light_attrs["Brightness Multiplier"]=ldata.energy
+
                     if ldata.type=="POINT":
-                        light_attrs["Light Type"] = "Point";
+                        light_attrs["Light Type"] = "Point"
                         light_attrs["Range"] = ldata.shadow_soft_size
-                        light_attrs["Specular Intensity"]=ldata.specular_factor
-                        light_attrs["Temperature"]=ldata.energy
                     elif ldata.type=="SUN" or ldata.type=="AREA":                
-                        light_attrs["Light Type"] = "Directional";
+                        light_attrs["Light Type"] = "Directional"
                         light_attrs["Specular Intensity"]=ldata.specular_factor
-                        light_attrs["Temperature"]=ldata.energy
                     elif ldata.type=="SPOT":                
-                        light_attrs["Light Type"] = "Spot";
-                        light_attrs["Temperature"]=ldata.energy
+                        light_attrs["Light Type"] = "Spot"
                         light_attrs["Range"] = ldata.shadow_soft_size
-                        light_attrs["Specular Intensity"]=ldata.specular_factor
                         light_attrs["Spot FOV"]=math.degrees(ldata.spot_size)
                         
                     col = ldata.color
                     light_attrs["Color"]="%s %s %s 1" % (col.r,col.g,col.b)
 
-                    if ldata.use_shadow:
-                        light_attrs["Cast Shadows"]="true"
-                    else:
+                    try:
+                        if ldata.cycles.cast_shadow:
+                            light_attrs["Cast Shadows"]="true"
+                        else:
+                            light_attrs["Cast Shadows"]="false"
+                    except:
+                        print("could not determin cast-shadow-value => false")
                         light_attrs["Cast Shadows"]="false"
 
                     add_component(a[modelNode],"Light",light_attrs)
@@ -1356,7 +1508,24 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
             filepath = GetFilepath(PathType.OBJECTS, GetGroupName(grp["group"].name), fOptions)
             if CheckFilepath(filepath[0], fOptions):
                 log.info( "!!Creating group-prefab {:s}".format(filepath[1]) )
-                WriteXmlFile(grp["xml"], filepath[0], fOptions)
+                dx,dy,dz=grp["instance_offset_delta"]
+                clone_data = copy.deepcopy(grp["xml"])
+                #rewrite positions of root-objects inside collection according to the collection-offset
+                for data in clone_data:
+                    print(data)
+                    if data.tag=="node":
+                        for idata in data:
+                            if idata.tag=="attribute" and idata.attrib["name"]=="Position":
+                                value = idata.attrib["value"]
+                                x,y,z=value.split(' ')
+                                
+                                new_x = float(x) + float(dx);   
+                                new_y = float(y) + float(dy);   
+                                new_z = float(z) + float(dz);   
+
+                                idata.attrib["value"]="%s %s %s" % (new_x,new_y,new_z)
+
+                WriteXmlFile(clone_data, filepath[0], fOptions)
 
     # Write collective and scene prefab files
     if not sOptions.mergeObjects:
@@ -1378,6 +1547,11 @@ def UrhoExportScene(context, uScene, sOptions, fOptions):
             
             log.info( "Creating material {:s}".format(filepath[1]) )
             
-            UrhoWriteMaterialTrees(fOptions)                    
+            UrhoWriteMaterialTrees(fOptions)         
+    
+    if urho_settings.generateSceneHeader:
+        WriteSceneHeaderFile("scenes",header_data,os.path.join(bpy.path.abspath(urho_settings.sceneHeaderOutputPath),"")+("%s.h"%bpy.context.scene.name))
+        WriteSceneHeaderFile("global",global_header_data,os.path.join(bpy.path.abspath(urho_settings.sceneHeaderOutputPath),"")+("global_resources.h"))
+           
 
             

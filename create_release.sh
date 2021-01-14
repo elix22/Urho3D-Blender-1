@@ -1,7 +1,9 @@
 HOME=$PWD
+FOLDER=${PWD##*/}
 
 rm -Rf runtimes
 rm -Rf temp
+rm urho3d-blender-exporter.zip
 
 mkdir -p runtimes
 mkdir temp
@@ -14,12 +16,12 @@ cd urho3d-blender-runtime-ver2/
 
 cd $HOME
 
-cp -R -L temp/urho3d-blender-runtime-ver2/build/native/bin/* runtimes
+cp -R -L temp/urho3d-blender-runtime-ver2/build/linux/bin/* runtimes
 cp temp/urho3d-blender-runtime-ver2/build/mingw/bin/urho3d-blender-runtime.exe runtimes
 
 rm -Rf temp
 rm -Rf __pycache__
 
 cd ..
-zip -r $HOME/urho3d-blender-exporter.zip Urho3D-Blender -x '*.git*'
+zip -r $HOME/urho3d-blender-exporter.zip $FOLDER -x '*.git*' -x '*pycache*'
 cd $HOME

@@ -26,7 +26,7 @@ bl_info = {
     "name": "Urho3D export",
     "description": "Urho3D export",
     "author": "reattiva, dertom",
-    "version": (0, 8),
+    "version": (0, 8, 1),
     "blender": (2, 80, 0),
     "location": "Properties > Render > Urho export",
     "warning": "",
@@ -42,12 +42,23 @@ if "decompose" in locals():
     imp.reload(utils)
     if DEBUG and "testing" in locals(): imp.reload(testing)
 
+try:
+    from PIL import Image,ImageDraw
+except:
+    import bpy,subprocess
+    pybin = bpy.app.binary_path_python
+    subprocess.check_call([pybin, '-m', 'ensurepip'])
+    subprocess.check_call([pybin, '-m', 'pip', 'install', 'Pillow'])
+    from PIL import Image,ImageDraw
+
+import re
+from pathlib import Path
 from .decompose import TOptions, Scan
 from .export_urho import UrhoExportData, UrhoExportOptions, UrhoWriteModel, UrhoWriteAnimation, \
                          UrhoWriteTriggers, UrhoExport
 from .export_scene import SOptions, UrhoScene, UrhoExportScene, UrhoWriteMaterialTrees
 from .utils import PathType, FOptions, GetFilepath, CheckFilepath, ErrorsMem, getLodSetWithID,getObjectWithID, execution_queue, \
-                    PingData,set_found_blender_runtime,found_blender_runtime, PingForRuntime
+                    PingData,set_found_blender_runtime,found_blender_runtime, PingForRuntime, copy_file,CalcNodeHash
 
 from .networking import Start as StartNetwork
 StartNetwork()
@@ -65,7 +76,7 @@ from .utils import vec2dict, matrix2dict
 from .addon_blender_connect.BConnectNetwork import Publish,StartNetwork,NetworkRunning,AddListener,GetSessionId
 from .addon_blender_connect import register as addon_blender_connect_register
 from .addon_blender_connect import unregister as addon_blender_connect_unregister
-import os
+import os,traceback
 import time
 import sys
 import shutil
@@ -77,10 +88,16 @@ tempObjects = []
 
 from .addon_jsonnodetree import JSONNodetreeUtils   
 from .addon_jsonnodetree.JSONNodetreeCustom import Custom 
-from .addon_jsonnodetree import register as jsonnodetree_register
-from .addon_jsonnodetree import unregister as jsonnodetree_unregister
-from .addon_jsonnodetree import unregisterSelectorPanel,NODE_PT_json_nodetree_select
-    
+from .addon_jsonnodetree import json_nodetree_register as jsonnodetree_register
+from .addon_jsonnodetree import json_nodetree_unregister as jsonnodetree_unregister
+from .addon_jsonnodetree import DeActivatePath2Timer as jsonnodetree_activateTimers
+from .addon_jsonnodetree import drawJSONFileSettings as jsonnodetree_draw_ui
+from .addon_jsonnodetree import NODE_PT_json_nodetree_file
+from .addon_jsonnodetree import JSONNodetree
+
+class URHO3D_JSONNODETREE_REBRAND(NODE_PT_json_nodetree_file):
+    bl_category = "Urho3D"
+    bl_label = "Urho3D-Settings"
 
 import bpy
 from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatProperty, IntProperty
@@ -156,22 +173,43 @@ consoleHandler.addFilter(consoleFilter)
 log.addHandler(consoleHandler)
 
 
+def PublishAction(self,context,action,dataDict):
+    setJson = json.dumps(dataDict, indent=4)
+    data = str.encode(setJson)
+    print("Publish action:%s data:%s" % (action,data))
+    Publish("blender",action,"json",data)    
+
+
+
 # publish runtime-settings (show_physics...) to runtime
 def PublishRuntimeSettings(self,context):
     settings={}
+    settings["export_path"]=bpy.path.abspath(self.outputPath)
     settings["show_physics"]=self.runtimeShowPhysics
     settings["show_physics_depth"]=self.runtimeShowPhysicsDepth
     settings["activate_physics"]=self.runtimeActivatePhysics
     settings["session_id"]=GetSessionId()
+    if not self.runtimeExportComponents:
+        settings["export_component_mode"]=0
+    else:
+        mode = self.runtimeExportComponentsMode
+        if mode == "LITE":
+            settings["export_component_mode"]=1
+        elif mode == "ALL":
+            settings["export_component_mode"]=2
+        else:
+            print("SETTINGS-ERROR! Unknown runtimeExportComponentsMode:%s" % mode)
 
     setJson = json.dumps(settings, indent=4)
-    print("settingsJson: %s" % setJson)
-    print("settingsJson: %s" % setJson)
-    print("settingsJson: %s" % setJson)
     print("settingsJson: %s" % setJson)
     data = str.encode(setJson)
 
     Publish("blender","settings","json",data)
+
+
+#    generateSceneHeader : BoolProperty(description="Export cpp-header to access scene-object name/id in code")
+
+#    sceneHeaderOutputPath : StringProperty(
 
 
 #--------------------
@@ -267,19 +305,10 @@ class UrhoAddonPreferences(bpy.types.AddonPreferences):
         return 'addon_jsonnodetree' in  bpy.context.preferences.addons.keys()
 
 
-    blender_connect_installed : BoolProperty(get=check_blender_connect)
-    json_nodetree_installed : BoolProperty(get=check_json_nodetree)
-            
     def draw(self, context):
 
         
         layout = self.layout
-
-        box = layout.box()
-        box.label(text="Requirements:")
-        box.prop(self, "blender_connect_installed",text="Addon: Blender Connect installed?")
-        box.prop(self, "json_nodetree_installed", text="Addon: JSON Nodetree installed?")
-        
 
         layout.prop(self, "runtimeFile")
         layout.prop(self, "outputPath")
@@ -479,15 +508,6 @@ class UL_URHO_NODETREE_SET_NODETREE_TO_SELECTED(bpy.types.Operator):
 
 
         if self.material_nt_name not in bpy.data.node_groups:
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
-            print("couldn't find nodetree:%s" % self.material_nt_name)
             print("couldn't find nodetree:%s" % self.material_nt_name)
             return
         
@@ -967,7 +987,19 @@ class UrhoExportGlobalSettings(bpy.types.PropertyGroup):
     file_id : bpy.props.IntProperty(default=-1) # a unique id that will optionally prefixed to your model-filename 
     
 
-    
+def renderpath_items(self,context):
+    try: 
+        return JSONNodetree.globalData["renderPaths_elemitems"]
+    except:
+        #print("Could not retrieve renderPaths")
+        return [("RenderPaths/Forward.xml","RenderPaths/Forward.xml","RenderPaths/Forward.xml",9902871)]
+
+def zone_cubetexture_items(self,context):
+    try: 
+        return zone_cubemap
+    except:
+        #print("Could not retrieve renderPaths")
+        return [("None","None","None",0)]        
 
 # Here we define all the UI objects to be added in the export panel
 class UrhoExportSettings(bpy.types.PropertyGroup):
@@ -990,7 +1022,7 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
             print("OUTPUT")
             #addonPrefs.outputPath = self.outputPath
 
-            bpy.data.worlds[0].jsonNodes.path = "%s__blender_material.json" % self.outputPath
+            bpy.data.worlds[0].jsonNodes.path = "%s__blender_material.json" % bpy.path.abspath(self.outputPath)
             print("--")
 
 
@@ -1034,6 +1066,15 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
             self.selectErrors = False
 
         self.updatingProperties = False
+
+
+    def ExportNoGeo(self,context):
+        #ExecuteAddon(context, True, True )
+        settings = context.scene.urho_exportsettings
+        if settings.runtimeAutoUpdateTransforms:
+            bpy.ops.urho.exportcommand()
+        #bpy.ops.urho.export(ignore_geo_skel_anim=True)
+
 
     def update_subfolders(self, context):
         # Move folders between the output path and the subfolders
@@ -1178,6 +1219,7 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
         self.collectivePrefab = False
         self.scenePrefab = False
         self.sceneCreateZone = False
+        self.sceneCreateSkybox = False
         self.trasfObjects = False
         self.physics = 'INDIVIDUAL'
         self.shape = 'TRIANGLEMESH'
@@ -1242,6 +1284,18 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
             update = update_subfolders)
 
     # --- RUNTIME SETTINGS ---
+    runtimeAutoUpdateTransforms : BoolProperty(
+            name = "Auto Export on Transform",
+            description = "Auto Export on Transform",
+            default = True,
+            update=PublishRuntimeSettings) 
+
+    runtimeUnstable : BoolProperty(
+            name = "Unstable Features",
+            description = "activate (even more) unstable features",
+            default = False
+            )             
+
     runtimeShowPhysics : BoolProperty(
             name = "Show Physics",
             description = "Show Urho3D-Physics",
@@ -1259,8 +1313,55 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
             name = "Show Physics Depth",
             description = "Use depth-test on drawing physics",
             default = False,
-            update=PublishRuntimeSettings)              
+            update=PublishRuntimeSettings)    
+
+    runtimeShowSRGB : BoolProperty(
+            name = "sRGB",
+            description = "enable sRGB",
+            default = False,
+            update=PublishRuntimeSettings)     
+
+    runtimeUseGamma : BoolProperty(
+            name = "gamma",
+            description = "enable gamma-correction",
+            default = False,
+            update=ExportNoGeo)     
+    runtimeUseHDR : BoolProperty(
+            name = "HDR",
+            description = "enable HDR",
+            default = False,
+            update=ExportNoGeo)     
+    runtimeUseBloom : BoolProperty(
+            name = "bloom",
+            description = "enable bloom",
+            default = False,
+            update=ExportNoGeo) 
+    
+    runtimeUseFXAA2 : BoolProperty(
+            name = "FXAA2",
+            description = "enable FXAA2",
+            default = False,
+            update=ExportNoGeo)                  
+
+    runtimeRenderPath : EnumProperty(
+            name = "RenderPath",
+            items = renderpath_items,
+            update=ExportNoGeo,
+            default=9902871)                       
                   
+    runtimeExportComponents : BoolProperty(
+            name = "Export Components",
+            description = "Export components to be used in Component-Tree",
+            default = True,
+            update=PublishRuntimeSettings)   
+
+    runtimeExportComponentsMode : EnumProperty(
+            name = "Component Export",
+            description = "Export components",
+            items=(('LITE', "Lite", "Just a selection of components",1),
+                   ('ALL', "All", "All registered components",2)),
+            default=1,
+            update=PublishRuntimeSettings)                  
 
     runtimeWorkingDir : bpy.props.StringProperty(
                     name="Runtime WorkingDir",
@@ -1275,11 +1376,11 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
                     maxlen = 512,
                     default = "")
 
-    runtimeExportComponents : bpy.props.StringProperty(
-                    name="component export file",
-                    description="Override component export-file (default: ./urho3d_components.json)",
-                    maxlen = 512,
-                    subtype = "FILE_PATH")   
+    # runtimeExportComponents : bpy.props.StringProperty(
+    #                 name="component export file",
+    #                 description="Override component export-file (default: ./urho3d_components.json)",
+    #                 maxlen = 512,
+    #                 subtype = "FILE_PATH")   
 
     enableRuntime2 : bpy.props.BoolProperty(default=False,description="enable a second runtime to be started from within blender")
 
@@ -1292,7 +1393,16 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
 
 
     # --- Output settings ---
-    
+    generateSceneHeader : BoolProperty(description="Export cpp-header to access scene-object name/id in code")
+
+    sceneHeaderOutputPath : StringProperty(
+            name = "",
+            description = "Path where to generate the sceneHeader-file",
+            default = "", 
+            maxlen = 1024,
+            subtype = "DIR_PATH",
+            update = update_func)   
+
     outputPath : StringProperty(
             name = "",
             description = "Path where to export",
@@ -1301,6 +1411,14 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
             subtype = "DIR_PATH",
             update = update_func)   
 
+    packPath : StringProperty(
+            name = "",
+            description = "Path where to store your package",
+            default = "", 
+            maxlen = 1024,
+            subtype = "FILE_PATH",
+            update = update_func)               
+
     useSubDirs : BoolProperty(
             name = "Use sub folders",
             description = "Use sub folders inside the output folder (Materials, Models, Textures ...)",
@@ -1308,25 +1426,32 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
 
     modelsPath : StringProperty(
             name = "Models",
-            description = "Models subpath (relative to output)")
+            description = "Models subpath (relative to output)",
+            default="Models")
     animationsPath : StringProperty(
             name = "Animations",
-            description = "Animations subpath (relative to output)")
+            description = "Animations subpath (relative to output)",
+            default="Models")
     materialsPath : StringProperty(
             name = "Materials",
-            description = "Materials subpath (relative to output)")
+            description = "Materials subpath (relative to output)",
+            default="Materials")
     techniquesPath : StringProperty(
             name = "Techniques",
-            description = "Techniques subpath (relative to output)")
+            description = "Techniques subpath (relative to output)",
+            default="Techniques")
     texturesPath : StringProperty(
             name = "Textures",
-            description = "Textures subpath (relative to output)")
+            description = "Textures subpath (relative to output)",
+            default="Textures")
     objectsPath : StringProperty(
             name = "Objects",
-            description = "Objects subpath (relative to output)")
+            description = "Objects subpath (relative to output)",
+            default="Objects")
     scenesPath : StringProperty(
             name = "Scenes",
-            description = "Scenes subpath (relative to output)")
+            description = "Scenes subpath (relative to output)",
+            default="Scenes")
 
     fileOverwrite : BoolProperty(
             name = "Files overwrite",
@@ -1414,7 +1539,15 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
     exportOnSave : BoolProperty(
             name = "Export Data on Save",
             description = "Export Data after Saving the blend",
-            default = False)    
+            default = False) 
+    
+    export_on_save_modes = [ 
+        ( "ALL","All Scene","All scene",1 ),
+        ( "NOGEO","No Geometry","No Geometry",2 ),
+        ( "MAT","Only Material","Only Materials",3 )
+    ]
+
+    exportOnSaveMode : EnumProperty(items=export_on_save_modes,default=1,description="Specific what export mode to use on save!")
 
     exportGroupsAsObject : BoolProperty(
             name = "Export Instanced Collections as PrefabObject",
@@ -1650,6 +1783,12 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
         description="Create Default Material-Nodetree"
     )
 
+    create_nodetree_from_material: StringProperty(
+        name="Create Urho3D-Material from Blender-Material",
+        default="",
+        description="Try to create urho3d-material from blender materials"
+    )
+
     materialsList : BoolProperty(
             name = "Materials text list",
             description = "Write a txt file with the list of materials filenames",
@@ -1695,7 +1834,29 @@ class UrhoExportSettings(bpy.types.PropertyGroup):
             name = "Create a default Zone",
             description = "Create DefaultZone-Node with -2000|-2000|-2000 2000|2000|2000",
             default = True,
-            update = update_func)
+            update = ExportNoGeo)
+
+    sceneZoneCubeTexture : EnumProperty(
+            name = "ZoneTexture",
+            items = zone_cubetexture_items,
+            update = ExportNoGeo)             
+
+    sceneCreateSkybox : BoolProperty(
+            name = "Creaete default skybox",
+            description = "Create DefaultZone-Skybox(Models/Sphere.mdl)",
+            default = False,
+            update = ExportNoGeo)
+    sceneSkyBoxHDR : BoolProperty(
+            name = "HDR",
+            description = "Use HDR-Material",
+            update = ExportNoGeo,
+            default = False)
+    
+
+    sceneSkyBoxCubeTexture : EnumProperty(
+            name = "ZoneTexture",
+            items = zone_cubetexture_items,
+            update = ExportNoGeo)             
 
     trasfObjects : BoolProperty(
             name = "Transform objects",
@@ -1812,6 +1973,7 @@ class UrhoReportDialog(bpy.types.Operator):
             layout.label(text = lines[1], icon = lineicon)
 
 
+
 # Export button
 class UrhoExportOperator(bpy.types.Operator):
     """ Start exporting """
@@ -1820,9 +1982,10 @@ class UrhoExportOperator(bpy.types.Operator):
     bl_label = "Export"
 
     ignore_geo_skel_anim : bpy.props.BoolProperty(default=False)
+    only_selected_mesh : bpy.props.BoolProperty(default=False)
   
     def execute(self, context):
-        ExecuteAddon(context, not bpy.context.scene.urho_exportsettings.showLog, self.ignore_geo_skel_anim )
+        ExecuteAddon(context, not bpy.context.scene.urho_exportsettings.showLog, self.ignore_geo_skel_anim,self.only_selected_mesh)
         return {'FINISHED'}
  
     def invoke(self, context, event):
@@ -1844,7 +2007,251 @@ def CreateInitialMaterialTree(nodetree):
         nodetree.links.new(matNode.outputs[0],techniqueNode.inputs[0])
         nodetree.links.new(matNode.outputs[0],standardNode.inputs[0])
 
+    nodetree.initialized=True
+
+
+def CreateMaterialFromNodetree(nodetree,material,pbr,copy_images=True):
+    images=[]
+
+    def add_filename_to_urhotexnode(urho3dTexNode,filename):
+        categories = urho3dTexNode.customData['prop_Texture_cat']
+        categories['all'].append((filename,filename,filename,CalcNodeHash(filename)))
+        if "imported" not in categories:
+            categories["imported"]=[]
+        enum_id = CalcNodeHash(filename)
+        categories['imported'].append((filename,filename,filename,enum_id))
+        urho3dTexNode.prop_Texture=filename        
+
+    def copy_image_and_set(eeveeTexNode,urho3dTexNode):
+        image = eeveeTexNode.image
+
+        settings = bpy.context.scene.urho_exportsettings
+        # copy image from eevveeNode to Textures-Folder and add this image to the image-categories to be able to set it
+        folder=os.path.join(settings.texturesPath,'')+"imported"
+        filename=os.path.join(folder,'')+bpy.path.basename(image.filepath)
+        abs_outputPath = os.path.join(bpy.path.abspath(settings.outputPath) ,'')
+
+        if image.packed_file:
+            full_ouput_path=abs_outputPath+filename
+            image.save_render(full_ouput_path)
+            add_filename_to_urhotexnode(urho3dTexNode,filename)
+        else:
+            ext = os.path.splitext(image.filepath)[1].lower()
+            if ext==".png" or ext==".jpg" or ext==".dds":
+                copy_file(image.filepath,abs_outputPath+folder,True)
+                add_filename_to_urhotexnode(urho3dTexNode,filename)
+            else:
+                Path(+folder).mkdir(parents=True, exist_ok=True)
+                withoutExt = os.path.splitext(filename)[0]
+                img = Image.open(bpy.path.abspath(image.filepath),"r")
+                
+                new_resource_path = withoutExt+".png"
+                full_output_path = abs_outputPath+new_resource_path
+                img.save(full_output_path)
+                add_filename_to_urhotexnode(urho3dTexNode,new_resource_path)
+        
+
+    def process_principled(bsdf):
+        nonlocal images
+
+        settings = bpy.context.scene.urho_exportsettings
+
+        matNode = nodetree.nodes.new("urho3dmaterials__materialNode")
+        matNode.location = Vector((0,200))
+
+        techniqueNode = nodetree.nodes.new("urho3dmaterials__techniqueNode")
+        techniqueNode.location = Vector((250,350))
+        #techniqueNode.prop_Technique = 'Techniques/NoTexture.xml'
+        techniqueNode.width = 500
+        nodetree.links.new(matNode.outputs[0],techniqueNode.inputs[0])
+
+
+        urho3d_color_tex   = None
+        urho3d_normal_tex  = None
+        urho3d_metallic_tex= None
+        urho3d_rough_tex   = None
+        urho3d_sepcular_tex= None
+
+        base_color = (1,1,1,1)
+
+        
+        # base-color
+        in_basecolor = bsdf.inputs["Base Color"]
+        
+        if in_basecolor.is_linked:
+            basecol_node = in_basecolor.links[0].from_node
+            
+            if basecol_node.type=="TEX_IMAGE":
+                # texture node
+                urho3d_color_tex = nodetree.nodes.new("urho3dmaterials__textureNode")
+                urho3d_color_tex.location = Vector((450,100))
+
+                nodetree.links.new(matNode.outputs[0],urho3d_color_tex.inputs[0])                
+                copy_image_and_set(basecol_node,urho3d_color_tex)
+            else:
+                print("Unknown basecolor_input:%s" %basecol_node.type)
+                pass
+        else:
+            base_color = in_basecolor.default_value
+
+        #normal
+        in_normal = bsdf.inputs["Normal"]
+
+        if in_normal.is_linked:
+            normal_node = in_normal.links[0].from_node
+
+            if normal_node.type=="NORMAL_MAP":
+                in_normal_color = normal_node.inputs["Color"]
+                if in_normal_color.is_linked and in_normal_color.links[0].from_node.type=="TEX_IMAGE":
+                    normal_map_tex = in_normal_color.links[0].from_node
+
+                    urho3d_normal_tex = nodetree.nodes.new("urho3dmaterials__textureNode")
+                    urho3d_normal_tex.prop_unit='normal'
+                    urho3d_normal_tex.location = Vector((650,100))
+                    nodetree.links.new(matNode.outputs[0],urho3d_normal_tex.inputs[0])
+                    copy_image_and_set(normal_map_tex,urho3d_normal_tex)
+
+        # specular-color
+        in_specularcolor = bsdf.inputs["Specular"]
+        
+        if in_specularcolor.is_linked:
+            specular_node = in_specularcolor.links[0].from_node
+            
+            if specular_node.type=="TEX_IMAGE":
+                # texture node
+                urho3d_sepcular_tex = nodetree.nodes.new("urho3dmaterials__textureNode")
+                urho3d_sepcular_tex.location = Vector((450,-200))
+                urho3d_sepcular_tex.prop_unit='specular'
+                nodetree.links.new(matNode.outputs[0],urho3d_sepcular_tex.inputs[0])                
+                copy_image_and_set(specular_node,urho3d_sepcular_tex)
+            else:
+                print("Unknown basecolor_input:%s" %basecol_node.type)
+                pass
+        else:
+            base_color = in_basecolor.default_value
+
+
+        # rough / metallic
+
+        rough_image = None
+        rough_channel = None
+        metal_image = None
+        metal_channel = None
+        composition_size = (0,0)
+        outputfilename = ""
+
+
+
+        in_rough = bsdf.inputs["Roughness"]
+        if in_rough.is_linked:
+            rough_node = in_rough.links[0].from_node
+
+            if rough_node.type=="SEPRGB":
+                rough_channel = in_rough.links[0].from_socket.name
+
+                in_rough_image = rough_node.inputs["Image"]
+
+                if in_rough_image.is_linked:
+                    rough_image_node = in_rough_image.links[0].from_node
+            else:
+                rough_image_node = rough_node # maybe they connect the texture directly
+
+            if rough_image_node.type=="TEX_IMAGE":
+                rough_image = Image.open(bpy.path.abspath(rough_image_node.image.filepath),"r")
+                if rough_image:
+                    composition_size = (rough_image.width,rough_image.height)
+                outputfilename += os.path.splitext(bpy.path.basename(rough_image_node.image.filepath))[0]
+            else:
+                print("Unknown rough-image-node:%s" %rough_image.type)
+                pass                        
+
+        in_metallic = bsdf.inputs["Metallic"]
+        if in_metallic.is_linked:
+            metallic_node = in_metallic.links[0].from_node
+
+            if metallic_node.type=="SEPRGB":
+                metal_channel = in_metallic.links[0].from_socket.name
+
+                in_metal_image = rough_node.inputs["Image"]
+
+                if in_metal_image.is_linked:
+                    metal_image_node = in_metal_image.links[0].from_node
+            else:
+                metal_image_node=metallic_node # maybe they connect the texture directly
+
+            if metal_image_node.type=="TEX_IMAGE":
+                metal_image = Image.open(bpy.path.abspath(metal_image_node.image.filepath),"r")
+                if metal_image.width > composition_size[0]:
+                    composition_size=(metal_image.width,metal_image.height)
+                
+                part2 = os.path.splitext(bpy.path.basename(metal_image_node.image.filepath))[0]
+                if outputfilename!=part2:
+                    outputfilename+=part2 # only had 2nd part if both parts are from different files
+            else:
+                print("Unknown rough-image-node:%s" %rough_image.type)
+                pass                        
+
+        metallicroughness = rough_image or metal_image
+
+        if metallicroughness:
+            empty_image = Image.new("RGBA",composition_size,(0,0,0,255))
+            r,g,b,a = empty_image.split()
+
+            if rough_image:
+                if rough_image.width < composition_size[0] or rough_image.height < composition_size[1]:
+                    rough_image = rough_image.resize(composition_size)
+                r = rough_image.getchannel(rough_channel)
+
+            if metal_image:
+                if metal_image.width < composition_size[0] or metal_image.height < composition_size[1]:
+                    metal_image = metal_image.resize(composition_size)
+                b = metal_image.getchannel(metal_channel)
+
+            result = Image.merge("RGBA",(r,g,b,a))
+
+            resource_part = os.path.join(settings.texturesPath,'')+"imported/gen_rm_"+outputfilename+".png"
+            outputfile=os.path.join( bpy.path.abspath(settings.outputPath),'')+resource_part
+            result.save(outputfile)
+
+            urho3d_roughmetal_tex = nodetree.nodes.new("urho3dmaterials__textureNode")
+            urho3d_roughmetal_tex.prop_unit='specular'
+            urho3d_roughmetal_tex.location = Vector((850,100))
+            nodetree.links.new(matNode.outputs[0],urho3d_roughmetal_tex.inputs[0])
+
+            add_filename_to_urhotexnode(urho3d_roughmetal_tex,resource_part)
+
+        if pbr:
+            pbsNode = nodetree.nodes.new("urho3dmaterials__pbsParams")
+            pbsNode.prop_MatDiffColor=base_color
+            pbsNode.location = Vector((250,100))
+
+            nodetree.links.new(matNode.outputs[0],pbsNode.inputs[0])
+        else:
+            standardNode = nodetree.nodes.new("urho3dmaterials__standardParams")
+            standardNode.location = Vector((250,100))
+            nodetree.links.new(matNode.outputs[0],standardNode.inputs[0])
+
+
+
+
         nodetree.initialized=True
+        
+
+
+
+
+
+
+    if nodetree and material and material.node_tree:
+        found_bsdf = False
+        for node in material.node_tree.nodes:
+            if node.type=="BSDF_PRINCIPLED":
+                if found_bsdf:
+                    print("ERROR! multiple bsdf-nodes not supported") # is that even allowed on the blender side?
+                    break
+                process_principled(node)
+                found_bsdf = True
+                
 
 class UrhoExportMaterialsOnlyOperator(bpy.types.Operator):
     """ Start exporting """
@@ -1867,7 +2274,7 @@ class UrhoExportCommandOperator(bpy.types.Operator):
     bl_label = "Export command"
   
     def execute(self, context):
-        ExecuteAddon(context, silent=True)
+        ExecuteAddon(context, silent=True, ignoreGeoAnim=True)
         return {'FINISHED'}
  
     def invoke(self, context, event):
@@ -2074,6 +2481,46 @@ class ApplyExportUrhoToCollectionChildren(bpy.types.Operator):
 
         return {'FINISHED'}
 
+class PackOutputFolder(bpy.types.Operator):
+    ''' Use packagetool on output-folder '''
+    bl_idname = "urho.pack_exportfolder"
+    bl_label = "Pack Folder"
+    
+
+    @classmethod
+    def poll(self, context):
+        return True
+
+    def execute(self, context):
+        settings = context.scene.urho_exportsettings
+        data={}
+        data["package_folder"]=bpy.path.abspath(settings.outputPath)
+        data["package_name"]=bpy.path.abspath(settings.packPath)
+
+        PublishAction(self,context,"packagetool",data)
+
+        return {'FINISHED'}
+
+class UrhoCreateNodetreeFromMaterial(bpy.types.Operator):
+    ''' Tries to create Urho3D-Material from eevee-material '''
+    bl_idname = "urho.createnodetree_from_material"
+    bl_label = "Create Urho3D-Material from Blender-Material"
+    
+    nodetreeName : bpy.props.StringProperty()
+
+    @classmethod
+    def poll(self, context):
+        return True
+
+    def execute(self, context):
+        settings = context.scene.urho_exportsettings
+        
+        if settings.create_nodetree_from_material and self.nodetreeName:
+            material = bpy.data.materials[settings.create_nodetree_from_material]
+            nodetree = bpy.data.node_groups[self.nodetreeName]
+            CreateMaterialFromNodetree(nodetree,material,True)
+
+        return {'FINISHED'}
 
 
 def ObjectUserData(obj,layout):
@@ -2141,6 +2588,8 @@ class UrhoExportObjectPanel(bpy.types.Panel):
             box.label(text="Collection '%s'" % currentCollection.name)
             row = box.row()
             row.prop(currentCollection,"urhoExport",text="export as urho object")
+            row = box.row()
+            row.prop(currentCollection,"instance_offset",text="Offset")
             
             if len(currentCollection.children)>0:
                 row = box.row()
@@ -2168,11 +2617,86 @@ class UrhoExportObjectPanel(bpy.types.Panel):
         #row.prop(object,"exportNoMesh",text="NO mesh-export for object")
 
 
+def MeshUI(self,context):
+    layout = self.layout
+    obj = context.object
+
+    scene = context.scene
+    settings = scene.urho_exportsettings
+
+    mesh = obj.data
+    row = layout.row()
+    row.label(text="Export Vertex-Data:")
+    row = layout.row()
+    row.prop(mesh.urho_export,"export_pos",text="Position")
+    row.prop(mesh.urho_export,"export_norm",text="Normals")
+    row = layout.row()
+    col = row.column()
+    col.prop(mesh.urho_export,"export_tan",text="Tangent")
+    col.enabled = mesh.urho_export.export_uv and mesh.urho_export.export_norm and mesh.urho_export.export_pos
+    row.prop(mesh.urho_export,"export_vcol",text="Vertex Color")
+    row = layout.row()
+    row.prop(mesh.urho_export,"export_weight",text="Weights")
+    row.prop(mesh.urho_export,"export_morph",text="Morphs")
+    
+    row = layout.row()
+    row.prop(mesh.urho_export,"export_uv",text="UV")
+    box = row.box()
+    if len(bpy.context.selected_objects)>0:
+        box.operator("urho.apply_vertexdata",text="Apply to selected").apply_to_selected=True
+    else:
+        box.operator("urho.apply_vertexdata",text="Apply to all").apply_to_selected=False
+
+    if mesh.urho_export.export_uv:
+
+        box = layout.box()
+
+        row = box.row()
+        row.prop(mesh.urho_export,"active_uv_as_uv1",text="use active uvmap as uv1")
+
+        row = box.row()
+        if mesh.urho_export.active_uv_as_uv1:
+            row.prop(mesh.urho_export,"auto_uv1_idx",text="uv1")
+        else:
+            row.prop(mesh.urho_export,"manual_uv1_idx",text="uv1")
+
+        row = box.row()
+        row.prop(mesh.urho_export,"use_uv2",text="use uv2")
+        if mesh.urho_export.use_uv2:
+            row.prop(mesh.urho_export,"manual_uv2_idx",text="")
+
+    box = layout.box()
+    row = box.row()
+    row.prop_search(obj,"lodsetName",bpy.data.worlds[0],"lodsets")
+    row = box.row()
+    row.operator("urho_button.generic",text="new lodset").typeName="create_lodset"
+
+    lodset = getLodSetWithID(obj.lodsetID)
+
+    if lodset:
+        row.operator("urho_button.generic",text="DELETE current").typeName="delete_lodset"
+    
+
+    if lodset:
+        row = box.row()
+        row.prop(lodset,"name")
+        row = box.row();
+        row = box.label(text="Lods")
+        row = box.row()
+        row.template_list("UL_URHO_LIST_LOD", "The_List", lodset,
+                        "lods", lodset, "lods_idx",rows=len(lodset.lods))
+
+        row = box.row()
+        row.prop(lodset,"armatureObj")
+        row = box.row()
+        row.operator('urho_lod.new_item', text='NEW')
+        row.operator('urho_lod.delete_item', text='REMOVE')
+        row.operator('urho_lod.move_item', text='UP').direction = 'UP'
+        row.operator('urho_lod.move_item', text='DOWN').direction = 'DOWN'
 
 
 # The export panel, here we draw the panel using properties we have created earlier
 class UrhoExportMeshPanel(bpy.types.Panel):
-    
     bl_idname = "urho.exportmeshpanel"
     bl_label = "Urho export"
     bl_space_type = 'PROPERTIES'
@@ -2182,87 +2706,25 @@ class UrhoExportMeshPanel(bpy.types.Panel):
     
     @classmethod
     def poll(self, context):
-        return context.object.type=="MESH"
+        return context.object.type=="MESH" or context.object.type=="LIGHT"
 
 
     # Draw the export panel
     def draw(self, context):
         layout = self.layout
         obj = context.object
-        mesh = obj.data
 
         scene = context.scene
         settings = scene.urho_exportsettings
 
+        if context.object.type=="LIGHT":
+            light = obj.data
+            row = layout.row()
+            box = row.box()
+            box.prop(light,"use_pbr",text="Use Physical Values(PBR)")
 
-        row = layout.row()
-        row.label(text="Export Vertex-Data:")
-        row = layout.row()
-        row.prop(mesh.urho_export,"export_pos",text="Position")
-        row.prop(mesh.urho_export,"export_norm",text="Normals")
-        row = layout.row()
-        col = row.column()
-        col.prop(mesh.urho_export,"export_tan",text="Tangent")
-        col.enabled = mesh.urho_export.export_uv and mesh.urho_export.export_norm and mesh.urho_export.export_pos
-        row.prop(mesh.urho_export,"export_vcol",text="Vertex Color")
-        row = layout.row()
-        row.prop(mesh.urho_export,"export_weight",text="Weights")
-        row.prop(mesh.urho_export,"export_morph",text="Morphs")
-        
-        row = layout.row()
-        row.prop(mesh.urho_export,"export_uv",text="UV")
-        box = row.box()
-        if len(bpy.context.selected_objects)>0:
-            box.operator("urho.apply_vertexdata",text="Apply to selected").apply_to_selected=True
-        else:
-            box.operator("urho.apply_vertexdata",text="Apply to all").apply_to_selected=False
-
-        if mesh.urho_export.export_uv:
-
-            box = layout.box()
-
-            row = box.row()
-            row.prop(mesh.urho_export,"active_uv_as_uv1",text="use active uvmap as uv1")
-
-            row = box.row()
-            if mesh.urho_export.active_uv_as_uv1:
-                row.prop(mesh.urho_export,"auto_uv1_idx",text="uv1")
-            else:
-                row.prop(mesh.urho_export,"manual_uv1_idx",text="uv1")
-
-            row = box.row()
-            row.prop(mesh.urho_export,"use_uv2",text="use uv2")
-            if mesh.urho_export.use_uv2:
-                row.prop(mesh.urho_export,"manual_uv2_idx",text="")
-
-        box = layout.box()
-        row = box.row()
-        row.prop_search(obj,"lodsetName",bpy.data.worlds[0],"lodsets")
-        row = box.row()
-        row.operator("urho_button.generic",text="new lodset").typeName="create_lodset"
-
-        lodset = getLodSetWithID(obj.lodsetID)
-
-        if lodset:
-            row.operator("urho_button.generic",text="DELETE current").typeName="delete_lodset"
-        
-
-        if lodset:
-            row = box.row()
-            row.prop(lodset,"name")
-            row = box.row();
-            row = box.label(text="Lods")
-            row = box.row()
-            row.template_list("UL_URHO_LIST_LOD", "The_List", lodset,
-                            "lods", lodset, "lods_idx",rows=len(lodset.lods))
-
-            row = box.row()
-            row.prop(lodset,"armatureObj")
-            row = box.row()
-            row.operator('urho_lod.new_item', text='NEW')
-            row.operator('urho_lod.delete_item', text='REMOVE')
-            row.operator('urho_lod.move_item', text='UP').direction = 'UP'
-            row.operator('urho_lod.move_item', text='DOWN').direction = 'DOWN'
+        elif context.object.type=="MESH":
+            MeshUI(self,context)
         
 # The export panel, here we draw the panel using properties we have created earlier
 class UrhoExportScenePanel(bpy.types.Panel):
@@ -2301,37 +2763,81 @@ class UrhoExportRenderPanel(bpy.types.Panel):
         scene = context.scene
         settings = scene.urho_exportsettings
 
-        row = layout.row()
+        outer_row = layout.row()
         #row=layout.row(align=True)
         minimizeIcon = 'ZOOM_IN' if settings.minimize else 'ZOOM_OUT'
-        row.prop(settings, "minimize", text="", icon=minimizeIcon, toggle=False)
-        row.operator("urho.export", icon='EXPORT').ignore_geo_skel_anim=False
+        outer_row.prop(settings, "minimize", text="", icon=minimizeIcon, toggle=False)
+        
+        col = outer_row.column()
+        row = col.row()
+        op = row.operator("urho.export", icon='EXPORT',text='Export: ALL SCENE')
+        op.ignore_geo_skel_anim=False
+        op.only_selected_mesh=False
+        row = col.row()
+        op = row.operator("urho.export", icon='EXPORT',text='Export: WITHOUT GEOMETRY')
+        op.ignore_geo_skel_anim=True
+        op.only_selected_mesh=False
+        row = col.row()
+        op = row.operator("urho.export", icon='EXPORT',text='Export: SELECTED MESHES')
+        op.ignore_geo_skel_anim=False
+        op.only_selected_mesh=True
+        row = col.row()
+        row.operator("urho.exportmaterials", icon='EXPORT', text='Export: ONLY MATERIAL')
+
+
+
+        row = col.row()
+        split = row.split(factor=0.2)
+        split.column().label(text="Folder:")
+        split = split.split()
+        split.column().prop(settings, "outputPath")
+
+        row = col.row()
+        row.prop(settings, "exportOnSave")
+        if settings.exportOnSave:
+            row.prop(settings,"exportOnSaveMode",text="")
+
         #split = layout.split(percentage=0.1)
         if sys.platform.startswith('win'):
-            row.operator("wm.console_toggle", text="", icon='CONSOLE')
-        row.prop(settings, "onlyErrors", text="", icon='FORCE_WIND')
-        row.operator("urho.report", text="", icon='TEXT')
+            outer_row.operator("wm.console_toggle", text="", icon='CONSOLE')
+        outer_row.prop(settings, "onlyErrors", text="", icon='FORCE_WIND')
+        outer_row.operator("urho.report", text="", icon='TEXT')
         if settings.minimize:
             return
 
-        row = layout.row()
-        row.operator("urho.export", icon='EXPORT',text='EXPORT(no geo)').ignore_geo_skel_anim=True
-        row.operator("urho.exportmaterials", icon='EXPORT')
+        # row = layout.row()
+        # row.operator("urho.export", icon='EXPORT',text='EXPORT(no geo)').ignore_geo_skel_anim=True
+        # row.operator("urho.exportmaterials", icon='EXPORT')
         
         row = layout.row()
+
+
+
         row.separator()
         row.separator()
+        row.prop(settings,"runtimeAutoUpdateTransforms",text="Export on transform")
         row.prop(settings,"showLog")    
 
 
-        row = layout.row()
-        row.label(text="Output:")
-
-
         box = layout.box()
+        
+        ibox = box.box()
+        row = ibox.row()
+        row.prop(settings,"generateSceneHeader")
+        if settings.generateSceneHeader:
+            row = ibox.row()
+            row.prop(settings,"sceneHeaderOutputPath")
 
-        box.label(text="Output folder:")
-        box.prop(settings, "outputPath")
+        ibox = box.box()
+        row = ibox.row()
+        split = row.split(factor=0.7)
+        col = split.column()
+        col.label(text="Pack Destination:")
+        split = split.split()
+        col = split.column()
+        pack_op = col.operator("urho.pack_exportfolder")
+        col.enabled=settings.packPath!=""
+        ibox.prop(settings,"packPath")
 
         row = box.row()
         row.label(text="Modelname:")
@@ -2339,7 +2845,6 @@ class UrhoExportRenderPanel(bpy.types.Panel):
 
         box.prop(settings, "generateModelNamePrefix")
 
-        box.prop(settings, "exportOnSave")
         box.prop(settings, "fileOverwrite")
         row = box.row()
         row.prop(settings, "useSubDirs")
@@ -2399,6 +2904,15 @@ class UrhoExportRenderPanel(bpy.types.Panel):
             row.prop(settings,"runtimeShowPhysics",text="show physics")
             if settings.runtimeShowPhysics:
                 row.prop(settings,"runtimeShowPhysicsDepth",text="use depth test")
+
+            row = innerbox.row()
+            row.prop(settings,"runtimeExportComponents")
+            if settings.runtimeExportComponents:
+                row.prop(settings,"runtimeExportComponentsMode",text="")
+
+            row = innerbox.row()
+            row.prop(settings,"runtimeRenderPath")
+
             #row = innerbox.row()
             #row.prop(settings,"runtimeActivatePhysics",text="activate physics")
             
@@ -2601,11 +3115,9 @@ class UrhoExportRenderPanel(bpy.types.Panel):
             row.prop(settings, "scenePrefab")
             row.label(text="", icon='WORLD')
 
-            if settings.scenePrefab:
-                row = box.row()
-                row.separator()
-                row.separator()
-                row.prop(settings,"sceneCreateZone")
+            # if settings.scenePrefab:
+            #     row = box.row()
+            #     row.prop(settings,"sceneCreateZone")
 
 
             specialBox = box.box()
@@ -2614,6 +3126,10 @@ class UrhoExportRenderPanel(bpy.types.Panel):
 
             row = specialBox.row()
             row.prop(settings, "export_userdata")
+
+            row = specialBox.row()
+            row.prop(settings, "runtimeUnstable")
+            
 
 
             # row = specialBox.row()
@@ -2630,7 +3146,7 @@ class UrhoExportRenderPanel(bpy.types.Panel):
 
 
 def ObjectComponentSubpanel(obj,layout,currentLayout=None, showAutoSelect=True):
-    if not layout: 
+    if not layout or not obj: 
         return
     
     if not currentLayout:
@@ -2691,7 +3207,6 @@ def ObjectMaterialNodetree(obj,box):
         row.operator("object.material_slot_deselect", text="Deselect")                
 
 
-
 class UrhoExportNodetreePanel(bpy.types.Panel):
     bl_space_type = 'NODE_EDITOR'
     bl_region_type = 'UI'
@@ -2709,6 +3224,7 @@ class UrhoExportNodetreePanel(bpy.types.Panel):
 
             space_treetype = bpy.context.space_data.tree_type
             nodetree = bpy.context.space_data.node_tree
+            settings = bpy.context.scene.urho_exportsettings
 
             #print("TreeType:%s" % space_treetype )
             PingForRuntime()
@@ -2728,27 +3244,215 @@ class UrhoExportNodetreePanel(bpy.types.Panel):
             if space_treetype=="urho3dmaterials" and bpy.context.active_object.type=="MESH":
                 innerBox = box.box()
                 row = innerBox.row()
-                row.prop(bpy.context.scene.urho_exportsettings,"create_default_material_nodetree",text="auto-create nodetree for empty nodetrees")
+                row.prop(settings,"create_default_material_nodetree",text="auto-create nodetree for empty nodetrees")
                 if nodetree and len(bpy.context.selected_objects):
                     row = innerBox.row()
                     row.operator("urho_nodetrees.set_selected").material_nt_name=nodetree.name
 
+
                 ObjectMaterialNodetree(obj,box)
 
                 if nodetree and not nodetree.initialized:
-                    print("TRY TO INIT")
+                    #print("TRY TO INIT")
 
                     def QueuedExecution():
                         CreateInitialMaterialTree(nodetree)
                         return
 
-                    execution_queue.execute_or_queue_action(QueuedExecution)        
+                    execution_queue.execute_or_queue_action(QueuedExecution)
 
+            jsonNodes = bpy.data.worlds[0].jsonNodes
+
+            row = layout.row()        
+            row.prop(jsonNodes,"autoSelectObjectNodetree",text="autoselect object nodetree")
+
+            if nodetree and settings.runtimeUnstable:
+                row = layout.row()
+                row.label(text="Experimental")
+                innerBox = layout.box()
+                row = innerBox.row()
+                row.label(text="Create Nodes from Material:")
+                
+                row = innerBox.row()
+                row.prop_search(settings,"create_nodetree_from_material",bpy.data,"materials",text="")
+                row = innerBox.row()
+                op = row.operator("urho.createnodetree_from_material")
+                op.nodetreeName = nodetree.name
+
+
+
+
+class URHO_PT_mainscene(bpy.types.Panel):
+    bl_idname = "URHO_PT_MAINSCENE"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Urho3D"
+    bl_label ="Urho3D-Scene"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def draw(self, context):
+        settings = bpy.context.scene.urho_exportsettings
+
+        layout = self.layout
+
+        row = layout.row()
+        box = layout.box()
+        row = box.row()
+        row.prop(settings,"runtimeRenderPath")
+        
+        if settings.runtimeUnstable:
+            row = box.row()
+            #row.prop(settings,"runtimeShowSRGB")
+            row.prop(settings,"runtimeUseGamma")
+            row.prop(settings,"runtimeUseHDR")
+            #row = box.row()
+            row.prop(settings,"runtimeUseBloom")
+            row.prop(settings,"runtimeUseFXAA2")
+        
+
+            row = layout.row()
+            row.prop(bpy.context.scene,"nodetree",text="Scene logic")
+
+        if settings.scenePrefab:
+            #Zone
+            row = layout.row()
+            split = row.split(factor=0.25)
+            split.prop(settings,"sceneCreateZone",text="Zone")
+            split=split.split(factor=0.75)
+            if settings.sceneCreateZone:
+                split.prop(settings,"sceneZoneCubeTexture",text="Texture")
+
+            #Skybox
+            row = layout.row()
+            split = row.split(factor=0.25)
+            split.prop(settings,"sceneCreateSkybox",text="Skybox")
+            split=split.split(factor=0.75)
+            if settings.sceneCreateSkybox:
+                split.prop(settings,"sceneSkyBoxCubeTexture",text="Texture")
+                split=split.split()
+                split.prop(settings,"sceneSkyBoxHDR",text="HDR")
+                
+
+        box = layout.box()
+        row = box.row()
+        row.prop(settings,"runtimeShowPhysics",text="show physics")
+        if settings.runtimeShowPhysics:
+            row.prop(settings,"runtimeShowPhysicsDepth",text="use depth test")
+
+class URHO_PT_mainuserdata(bpy.types.Panel):
+    bl_idname = "URHO_PT_MAINCOMPONENT"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Urho3D"
+    bl_label ="Urho3D-Components"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def draw(self, context):
+        obj = bpy.context.active_object
+        layout = self.layout
+        ObjectComponentSubpanel(obj,layout)
+
+class URHO_PT_mainobject(bpy.types.Panel):
+    bl_idname = "URHO_PT_MAINOBJECT"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Urho3D"
+    bl_label ="Urho3D-Object"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def draw(self, context):
+        obj = bpy.context.active_object
+
+        if not obj:
+            return
+
+        layout = self.layout
+        if obj.type=="MESH":
+            row = layout.row()
+            row.prop(obj,"hide_render",text="Invisibile", toggle=False)
+            row = layout.row()
+            row.label(text="Shadow Settings")
+            row = layout.row()
+            row.prop(obj,"cast_shadow")
+
+class URHO_PT_mainmesh(bpy.types.Panel):
+    bl_idname = "URHO_PT_MAINMESH"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Urho3D"
+    bl_label ="Urho3D-Mesh"
+
+    @classmethod
+    def poll(cls, context):
+        obj = bpy.context.active_object
+        return obj and obj.type=="MESH"
+
+    def draw(self, context):
+        MeshUI(self,context)
+
+
+
+class URHO_PT_maincomponent(bpy.types.Panel):
+    bl_idname = "URHO_PT_MAINUSERDATA"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Urho3D"
+    bl_label ="Urho3D-Userdata"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def draw(self, context):
+        layout = self.layout
+        obj = bpy.context.active_object
+        if obj:
+
+            box = layout.box()
+            row = box.row()
+            row.label(text="Object-Name:")
+            row = box.row()
+            row.prop(obj,"name",text="")
+            ObjectUserData(obj,layout)
+        
+
+
+class URHO_PT_mainmaterial(bpy.types.Panel):
+    bl_idname = "URHO_PT_MAINMATERIAL"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Urho3D"
+    bl_label ="Urho3D-Material"
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type=="MESH"
+
+    def draw(self, context):
+        settings = bpy.context.scene.urho_exportsettings
+
+        layout = self.layout
+
+        obj = bpy.context.active_object
+
+        ObjectMaterialNodetree(obj,layout)
 
 #--------------------
 # Handlers
 #--------------------
-
+def get_default_context():
+    window = bpy.context.window_manager.windows[0]
+    return {'window': window, 'screen': window.screen}
+    
 # Called after loading a new blend. Set the default path if the path edit box is empty.        
 @persistent
 def PostLoad(dummy):
@@ -2757,13 +3461,67 @@ def PostLoad(dummy):
     settings.errorsMem.Clear()
     settings.updatingProperties = False
     settings.reset_paths(bpy.context, False)
+    setup_json_nodetree()
+    ctx=bpy.context
+    PublishRuntimeSettings(settings,bpy.context)
+
+def has_non_objectmode_parent(obj):
+    current_parent=obj.parent
+    while current_parent:
+        try:
+            if current_parent.mode!="OBJECT":
+                return True
+        except:
+            return True # no mode, no relevant object => no object mode
+        current_parent = current_parent.parent
+    return False
+
+@persistent
+def on_depsgraph_update_post(self):
+    # Recache
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+
+    if len(depsgraph.updates)>0:
+        for update in depsgraph.updates:
+            try:
+                if update.is_updated_transform and hasattr(update.id,"type"):
+                    obj = update.id
+
+                    if obj.type!="ARMATURE" and obj.animation_data:
+                        # object with object animation, don't save, otherwise transform would be reset according to the current animation
+                        continue
+
+                    if obj.mode!="OBJECT" or has_non_objectmode_parent(obj):
+                        continue
+                    
+                    UpdateCheck.pos = obj.location
+                    UpdateCheck.rot = obj.rotation_euler
+                    UpdateCheck.scale = obj.scale
+                    UpdateCheck.modified_obj = obj
+                    print("Updated:%s" % update.id.name)
+
+                    UpdateCheck.request_save_scene = True
+                    return
+            except:
+                pass
 
 @persistent
 def PostSave(dummy):
     settings = bpy.context.scene.urho_exportsettings
     if settings.exportOnSave:
+
+        if settings.exportOnSaveMode=='ALL':
+            bpy.ops.urho.export(ignore_geo_skel_anim=False)
+        elif settings.exportOnSaveMode=='NOGEO':
+            print("NOGEO")
+            bpy.ops.urho.export(ignore_geo_skel_anim=True)
+        elif settings.exportOnSaveMode=="MAT":
+            bpy.ops.urho.exportmaterials()
+        else:
+            print("UNKNOWN SAVEMODE %s" % settings.exportOnSaveMode)
+
         print("AUTO EXPORT on SAVE")
-        bpy.ops.urho.export()
+        
     
 
 
@@ -2780,6 +3538,32 @@ ntSelectedObject = None
 
 tick = 0.05
 
+zone_cubemap=[("None","None","None",0)]
+
+def callback_after_nodetreecreation():
+    global zone_cubemap
+    try:
+        zone_cubemap=[("None","None","None",0)] + JSONNodetree.globalData["cubeTextures_elemitems"]
+    except:
+        zone_cubemap=[("None","None","None",0)]                
+
+JSONNodetreeUtils.AfterNodeTreeCreationCallback=callback_after_nodetreecreation
+
+class UpdateCheck:
+    last_pos = None
+    last_rot = None
+    last_scale = None
+    last_obj = None
+
+    request_save_scene = False
+    pos=None
+    rot=None
+    scale=None
+    modified_obj=None  
+    timer = 1.0 
+
+    saving = False 
+
 # timer callback
 #if 'call_execution_queue' not in globals():
 def call_execution_queue():
@@ -2795,6 +3579,39 @@ def call_execution_queue():
         else:
             PingData.ping_auto_timer -= tick
             #print("PingData.auto_timer %s" % PingData.ping_auto_timer)
+
+        settings = bpy.context.scene.urho_exportsettings
+        if UpdateCheck.request_save_scene and settings.outputPath:
+            UpdateCheck.timer-=tick
+            #print("Check[%s]: %s=%s %s=%s %s=%s " %(UpdateCheck.timer,UpdateCheck.last_pos,UpdateCheck.pos,UpdateCheck.last_rot,UpdateCheck.rot,UpdateCheck.last_scale,UpdateCheck.scale))
+ 
+
+            isTransSame = UpdateCheck.last_pos==UpdateCheck.pos and UpdateCheck.last_rot==UpdateCheck.rot and UpdateCheck.last_scale==UpdateCheck.scale
+
+            if not UpdateCheck.saving and isTransSame and UpdateCheck.timer<=0:
+                print("EXPORT EXPORT")
+                #ExecuteAddon(bpy.context,True,True)
+                if settings.runtimeAutoUpdateTransforms:
+                    bpy.ops.urho.exportcommand()
+                    #bpy.ops.urho.export(ignore_geo_skel_anim=True)
+                UpdateCheck.modified_obj=None
+                UpdateCheck.last_obj=None
+                UpdateCheck.last_pos=None
+                UpdateCheck.last_rot=None
+                UpdateCheck.last_scale=None
+                UpdateCheck.pos=None
+                UpdateCheck.rot=None
+                UpdateCheck.scale=None
+                UpdateCheck.request_save_scene=False
+                UpdateCheck.timer=1.0
+            else:
+                UpdateCheck.last_obj=UpdateCheck.modified_obj
+                UpdateCheck.last_pos=UpdateCheck.pos
+                UpdateCheck.last_rot=UpdateCheck.rot
+                UpdateCheck.last_scale=UpdateCheck.scale
+
+
+        
 
     if PingData.ping_check_running:
         bpy.context.scene.view_settings.view_transform = 'Raw'
@@ -2823,12 +3640,66 @@ def call_execution_queue():
 
     return tick
         
+def customAutoSelection(current_obj,current_treetype,current_tree):
+    global ntSelectedObject
+    def chooseRighTreeForObject(current_obj,current_treetype,current_tree):
+        global ntSelectedObject
+
+        if current_treetype=="urho3dcomponents" and current_obj:
+            selectNT = current_obj.list_index_nodetrees
+            if current_obj and len(current_obj.nodetrees)>0 and current_obj.nodetrees[selectNT].nodetreePointer:
+                try:
+                    autoNodetree = current_obj.nodetrees[selectNT].nodetreePointer
+                    ntSelectedObject = current_obj                                
+                    return autoNodetree
+                except:
+                    pass
+        elif current_treetype=="urho3dmaterials" and current_obj.type=="MESH" and len(current_obj.data.materialNodetrees)>0:
+            if current_obj and current_obj.data and len(current_obj.data.materialNodetrees)>0:
+                selectNT = current_obj.data.list_index_nodetrees
+                try:
+                    slot = current_obj.data.materialNodetrees[bpy.context.object.active_material_index]                                  
+                    if slot.nodetreePointer:
+                        autoNodetree = slot.nodetreePointer
+                    ntSelectedObject = current_obj
+                    return autoNodetree
+                except:
+                    return "NOTREE"
+    # aprint("CUSTOM CHECK:%s %s %s" % (current_obj.name,current_treetype,current_tree))
+    # check if we have at least one nodetree for this object
+    if bpy.data.worlds[0].jsonNodes.autoSelectObjectNodetree:
+        return chooseRighTreeForObject(current_obj,current_treetype,current_tree)     
+        # dont show anything if in auto mode and no nodetree found
+    else:
+        # when a different treetype is chosen than seen, change this. once
+        if (current_treetype and current_tree and current_treetype!=current_tree.bl_idname):
+            return chooseRighTreeForObject(current_obj,current_treetype,current_tree)     
+
+    return None
+
+
+def setup_json_nodetree():
+    # setup json-nodetree
+    JSONNodetreeUtils.overrideAutoNodetree = customAutoSelection
+    bpy.data.worlds[0].jsonNodes.path_ui_name = "Material-JSON"
+    bpy.data.worlds[0].jsonNodes.path2_ui_name = "Component-JSON"
+    bpy.data.worlds[0].jsonNodes.load_trees_button_name = "Load Trees"
+    bpy.data.worlds[0].jsonNodes.show_custom_ui_field = False
+    bpy.data.worlds[0].jsonNodes.show_developer = False
+    bpy.data.worlds[0].jsonNodes.show_export_panel = False
+    bpy.data.worlds[0].jsonNodes.show_auto_select = False
+    bpy.data.worlds[0].jsonNodes.show_object_mapping = False
+    print("--ok--")
+
 
 def register():
     try:
         jsonnodetree_register()
+        bpy.utils.register_class(URHO3D_JSONNODETREE_REBRAND)
+        #bpy.unregister_class(NODE_PT_json_nodetree_file)
     except:
-        print("Unexpected error in jsonnodetree_register:", sys.exc_info()[0])
+        desired_trace = traceback.format_exc()
+        print("Unexpected error in jsonnodetree_register:", desired_trace)
 
     try:    
         addon_blender_connect_register()
@@ -2916,8 +3787,11 @@ def register():
     
     #bpy.utils.register_module(__name__)
     
+    try:
+        bpy.utils.register_class(UrhoRenderEngine)
+    except:
+        print("Unexpected error in jsonnodetree_register_ui:%s" % traceback.format_exc())
 
-    bpy.utils.register_class(UrhoRenderEngine)
     reRegister()
     bpy.utils.register_class(UrhoAddonPreferences)
     bpy.utils.register_class(UrhoExportSettings)
@@ -2937,6 +3811,15 @@ def register():
     bpy.utils.register_class(UrhoApplyVertexData)
     bpy.utils.register_class(ApplyExportUrhoToCollectionChildren)
     bpy.utils.register_class(UL_URHO_NODETREE_SET_NODETREE_TO_SELECTED)
+    bpy.utils.register_class(URHO_PT_mainscene)
+    bpy.utils.register_class(URHO_PT_maincomponent)
+    bpy.utils.register_class(URHO_PT_mainmaterial)
+    bpy.utils.register_class(URHO_PT_mainuserdata)
+    bpy.utils.register_class(PackOutputFolder)
+    bpy.utils.register_class(UrhoCreateNodetreeFromMaterial)
+    bpy.utils.register_class(URHO_PT_mainobject)
+    bpy.utils.register_class(URHO_PT_mainmesh)
+    
 
     
     bpy.utils.register_class(UrhoReportDialog)
@@ -2958,6 +3841,9 @@ def register():
     bpy.types.Object.list_index_userdata = IntProperty(name = "Index for key value list",default = 0)
     bpy.types.Object.cast_shadow = bpy.props.BoolProperty(default=True)
     bpy.types.Object.receive_shadow = bpy.props.BoolProperty(default=True)
+    
+    bpy.types.Light.use_pbr=bpy.props.BoolProperty()
+    bpy.types.Light.brightness_mul=bpy.props.FloatProperty(min=0.0,max=90000.0,default=1.0)
 
     bpy.types.Mesh.ID = bpy.props.IntProperty(default=-1)
     bpy.types.Mesh.urho_export = bpy.props.PointerProperty(type=UrhoExportMeshSettings)
@@ -3011,57 +3897,17 @@ def register():
 
         
 
-    def customAutoSelection(current_obj,current_treetype,current_tree):
-        global ntSelectedObject;
-        def chooseRighTreeForObject(current_obj,current_treetype,current_tree):
-            global ntSelectedObject;
-
-            if current_treetype=="urho3dcomponents" and current_obj:
-                selectNT = current_obj.list_index_nodetrees
-                if current_obj and len(current_obj.nodetrees)>0 and current_obj.nodetrees[selectNT].nodetreePointer:
-                    try:
-                        autoNodetree = current_obj.nodetrees[selectNT].nodetreePointer
-                        ntSelectedObject = current_obj                                
-                        return autoNodetree
-                    except:
-                        pass
-            elif current_treetype=="urho3dmaterials" and current_obj.type=="MESH" and len(current_obj.data.materialNodetrees)>0:
-                if current_obj and current_obj.data and len(current_obj.data.materialNodetrees)>0:
-                    selectNT = current_obj.data.list_index_nodetrees
-                    try:
-                        slot = current_obj.data.materialNodetrees[bpy.context.object.active_material_index]                                  
-                        if slot.nodetreePointer:
-                            autoNodetree = slot.nodetreePointer
-                        ntSelectedObject = current_obj
-                        return autoNodetree
-                    except:
-                        return "NOTREE"
-        # aprint("CUSTOM CHECK:%s %s %s" % (current_obj.name,current_treetype,current_tree))
-        # check if we have at least one nodetree for this object
-        if bpy.data.worlds[0].jsonNodes.autoSelectObjectNodetree:
-            return chooseRighTreeForObject(current_obj,current_treetype,current_tree)     
-            # dont show anything if in auto mode and no nodetree found
-        else:
-            # when a different treetype is chosen than seen, change this. once
-            if (current_treetype and current_tree and current_treetype!=current_tree.bl_idname):
-                return chooseRighTreeForObject(current_obj,current_treetype,current_tree)     
-
-        return None
 
 
 
 
-    JSONNodetreeUtils.overrideAutoNodetree = customAutoSelection
     
-    unregisterSelectorPanel()
+    #unregisterSelectorPanel()
     #bpy.utils.unregister_class(NODE_PT_json_nodetree_select)
     
     print("ok!")
 
-
-
-    
-
+    print("activate autoload-timers")
     #bpy.context.preferences.filepaths.use_relative_paths = False
     
     if not PostLoad in bpy.app.handlers.load_post:
@@ -3070,7 +3916,17 @@ def register():
     if not PostSave in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(PostSave)
 
+    if not on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(on_depsgraph_update_post)
+
     bpy.app.timers.register(call_execution_queue,persistent=True)        
+
+
+
+    execution_queue.queue_action(setup_json_nodetree)
+
+    execution_queue.queue_action(jsonnodetree_activateTimers)
+
 
     # handle the shortcuts
     wm = bpy.context.window_manager
@@ -3096,6 +3952,7 @@ def register():
 def unregister():
     try:
         jsonnodetree_unregister()
+        bpy.utils.unregister_class(URHO3D_JSONNODETREE_REBRAND)
     except:
         print("Unexpected error in jsonnodetree_register:", sys.exc_info()[0])
 
@@ -3126,6 +3983,16 @@ def unregister():
     bpy.utils.unregister_class(UrhoExportStartRuntime2)
     bpy.utils.unregister_class(ApplyExportUrhoToCollectionChildren)
     bpy.utils.unregister_class(UL_URHO_NODETREE_SET_NODETREE_TO_SELECTED)
+    bpy.utils.unregister_class(URHO_PT_mainscene) 
+    bpy.utils.unregister_class(URHO_PT_mainuserdata)    
+    bpy.utils.unregister_class(URHO_PT_mainmaterial)
+    bpy.utils.unregister_class(URHO_PT_maincomponent)
+    bpy.utils.unregister_class(PackOutputFolder)
+    bpy.utils.unregister_class(UrhoCreateNodetreeFromMaterial)
+    bpy.utils.unregister_class(URHO_PT_mainobject)
+    bpy.utils.unregister_class(URHO_PT_mainmesh)
+
+
 
     try:
         bpy.utils.unregister_class(UrhoExportRenderPanel)
@@ -3156,7 +4023,6 @@ def unregister():
     
     del bpy.types.Scene.urho_exportsettings
     del bpy.types.Object.user_data
-    del bpy.types.World.urho_global
     del bpy.types.NodeTree.initialized
     
     bpy.utils.unregister_class(UL_URHO_LIST_NODETREE)
@@ -3164,12 +4030,23 @@ def unregister():
     bpy.utils.unregister_class(UL_URHO_LIST_ITEM_DEL_NODETREE)
     bpy.utils.unregister_class(UL_URHO_LIST_ITEM_MOVE_NODETREE)
 
+    bpy.utils.unregister_class(UL_URHO_LIST_MATERIAL_NODETREE)
+    bpy.utils.unregister_class(UL_URHO_LIST_ITEM_MATERIAL_NODETREE)
+    bpy.utils.unregister_class(UL_URHO_LIST_ITEM_DEL_MATERIAL_NODETREE)
+    bpy.utils.unregister_class(UL_URHO_LIST_ITEM_MOVE_MATERIAL_NODETREE)
+    bpy.utils.unregister_class(MaterialNodetreeInfo)
+    del bpy.types.Mesh.materialNodetrees
+    del bpy.types.Mesh.list_index_nodetrees
+
+    bpy.utils.unregister_class(NodetreeInfo)
+    del bpy.types.Object.nodetrees
+    del bpy.types.Object.list_index_nodetrees
+
     bpy.utils.unregister_class(UrhoExportNodetreePanel)
     bpy.utils.unregister_class(UrhoExportScenePanel)
-    del bpy.types.Object.materialNodetree
-    del bpy.types.Object.materialTreeId
+
     del bpy.types.Scene.nodetree
-    del bpy.types.Scene.sceneTreeId
+#    del bpy.types.Scene.sceneTreeId
     del bpy.types.Collection.urhoExport
 
 
@@ -3405,6 +4282,9 @@ def ExecuteUrhoExport(context):
     sOptions.doCollectivePrefab = settings.collectivePrefab
     sOptions.doScenePrefab = settings.scenePrefab
     sOptions.SceneCreateZone = settings.sceneCreateZone
+    sOptions.ZoneTexture = settings.sceneZoneCubeTexture
+    sOptions.sceneCreateSkybox = settings.sceneCreateSkybox
+    sOptions.sceneSkyBoxCubeTexture = settings.sceneSkyBoxCubeTexture
     sOptions.noPhysics = (settings.physics == 'DISABLE')
     sOptions.individualPhysics = (settings.physics == 'INDIVIDUAL')
     sOptions.wiredAsEmpty = settings.wiredAsEmpty
@@ -3651,24 +4531,34 @@ def ExecuteUrhoExport(context):
     return True
 
 
-def ExecuteAddon(context, silent=False, ignoreGeoAnim=False):
+def ExecuteAddon(context, silent=False, ignoreGeoAnim=False, onlySelectedMesh=False):
+    UpdateCheck.saving = True
+
     global_settings = bpy.data.worlds[0].global_settings
+
+    export_no_geo_afterwards = False
 
     if global_settings.file_id == -1:
         global_settings.file_id = random.randrange(100,999)
 
     settings = bpy.context.scene.urho_exportsettings
 
+    before_export_geo =  settings.geometries
+    before_export_anim = settings.animations
+    before_export_skel = settings.skeletons
+    before_export_morph = settings.morphs
+    before_export_source = settings.source
+
     if ignoreGeoAnim:
-        before_export_geo =  settings.geometries
-        before_export_anim = settings.animations
-        before_export_skel = settings.skeletons
-        before_export_morph = settings.morphs
         settings.geometries = False
         settings.animations = False
         #settings.skeletons = False
         settings.morphs = False
-
+    elif onlySelectedMesh:
+        settings.source = "ONLY_SELECTED"
+        settings.scenePrefab = False
+        export_no_geo_afterwards = True
+        settings.geometries = True
 
     before_export_selection = bpy.context.selected_objects
     before_export_active_obj = bpy.context.active_object
@@ -3704,17 +4594,24 @@ def ExecuteAddon(context, silent=False, ignoreGeoAnim=False):
     #bpy.ops.object.mode_set(mode=before_export_mode, toggle=False)
 
 
-    if ignoreGeoAnim:
-        settings.geometries = before_export_geo
-        settings.animations = before_export_anim
-        settings.skeletons = before_export_skel
-        settings.morphs = before_export_morph
+    settings.geometries = before_export_geo
+    settings.animations = before_export_anim
+    settings.skeletons = before_export_skel
+    settings.morphs = before_export_morph
+    settings.source = before_export_source
+    settings.scenePrefab = True
+    
+    if export_no_geo_afterwards:
+        ExecuteAddon(context, True, True, False)
 
 
     log.info("Export ended in {:.4f} sec".format(time.time() - startTime) )
     
     if not silent:
         bpy.ops.urho.report('INVOKE_DEFAULT')
+
+    UpdateCheck.saving = False
+
 
             
 if __name__ == "__main__":

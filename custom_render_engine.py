@@ -1,5 +1,5 @@
 import bpy
-import bgl
+import bgl,os
 import json
 import ctypes
 import math
@@ -7,6 +7,15 @@ from bpy_extras import view3d_utils
 from threading import current_thread
 import weakref
 from mathutils import Vector
+
+try:
+    from PIL import Image,ImageDraw
+except:
+    import bpy,subprocess
+    pybin = bpy.app.binary_path_python
+    subprocess.check_call([pybin, '-m', 'ensurepip'])
+    subprocess.check_call([pybin, '-m', 'pip', 'install', 'Pillow'])
+    from PIL import Image,ImageDraw
 
 # connect to blender connect if available
 from .utils import execution_queue, vec2dict, matrix2dict, PingForRuntime
@@ -90,7 +99,10 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
             "current_view_distance" : None,
             "export_path" : None,
             "pos" : None,
-            "dir" : None
+            "dir" : None,
+            "clip_start" : 0,
+            "clip_end" : 0,
+            "frame_current" : 0
         }
 
         execution_queue.execute_or_queue_action(PingForRuntime)
@@ -190,12 +202,12 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
         pos = view3d_utils.region_2d_to_origin_3d(region, region3d, (region.width/2.0, region.height/2.0))
 
         if (self.forceUpdate or forceMatrix 
+                or data["frame_current"] != scene.frame_current
                 or data["current_view_matrix"] != region3d.view_matrix 
                 or data["pos"]!=pos or data["dir"]!=direction
                 or (region3d.view_perspective=="ORTHO" and data["current_view_distance"]!=region3d.view_distance)):
             data["current_view_matrix"] = region3d.view_matrix.copy()
             data["current_view_distance"] = region3d.view_distance
-
             data["dir"]=direction
             data["pos"]=pos
 
@@ -210,6 +222,10 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
             self.changes["perspective_matrix"]=matrix2dict(region3d.perspective_matrix);
             self.changes["fov"]=fov
             self.changes["view_distance"]=region3d.view_distance
+    
+            if data["frame_current"] != scene.frame_current:
+                self.changes["scene_time"] = (scene.frame_current-1) / scene.render.fps
+            data["frame_current"] = scene.frame_current
 
             
 
@@ -217,7 +233,7 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
             self.changes["view_up"]=vec2dict(top)
             self.changes["view_position"]=vec2dict(pos)
 
-            print("pos:%s type:%s dir:%s top:%s" %(str(pos),type(pos),direction,top))
+            #print("pos:%s type:%s dir:%s top:%s" %(str(pos),type(pos),direction,top))
             
             self.forceUpdate = False
             changed = True
@@ -247,14 +263,17 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
 
             data["width"] = region.width
             data["height"] = region.height
+            self.changes["clip_start"]=space_view3d.clip_start
+            self.changes["clip_end"]=space_view3d.clip_end
+            
             self.changes["resolution"]={ 'width' : region.width, 'height' : region.height }
 
             self.tag_redraw()
-            print("CHANGED")
+            #print("CHANGED")
         else:
             if self.changes:
                 changesJson = json.dumps(self.changes, indent=4)
-                print("changesJson: %s" % changesJson)
+                #print("changesJson: %s" % changesJson)
                 data = str.encode(changesJson)
 
                 Publish("blender","data_change","json",data)
@@ -315,8 +334,8 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
             first_time = True
 
             # Loop over all datablocks used in the scene.
-            for datablock in depsgraph.ids:
-                pass
+            # for datablock in depsgraph.ids:
+            #     pass
         else:
             first_time = False
 
@@ -329,9 +348,9 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
                 print("Materials updated")
 
         # Loop over all object instances in the scene.
-        if first_time or depsgraph.id_type_updated('OBJECT'):
-            for instance in depsgraph.object_instances:
-                pass
+        # if first_time or depsgraph.id_type_updated('OBJECT'):
+        #     for instance in depsgraph.object_instances:
+        #         pass
 
     # For viewport renders, this method is called whenever Blender redraws
     # the 3D viewport. The renderer is expected to quickly draw the render
@@ -363,15 +382,22 @@ class UrhoRenderEngine(bpy.types.RenderEngine):
         bgl.glDisable(bgl.GL_BLEND)
 
 
+urhoImage = Image.open(os.path.dirname(os.path.realpath(__file__))+"/res/urho3d.png","r")
+
 class CustomDrawData:
     def __init__(self, dimensions):
+        global urhoImage
         # Generate dummy float image buffer
         self.dimensions = dimensions
         width, height = dimensions
 
         print("NEW CUSTOMDRAWDATA with resolution %s:%s" %( width,height ))
 
-        self.pixels = [255,0,0,255] * width * height
+        blank = Image.new('RGBA',(width,height),(100,100,100,255))
+        blank.alpha_composite(urhoImage,dest=(int(width/2-urhoImage.width/2),int(height/2-urhoImage.height/2)))
+
+        #self.pixels = [255,0,0,255] * width * height
+        self.pixels = list(blank.tobytes())
         self.pixels = bgl.Buffer(bgl.GL_BYTE, width * height * 4, self.pixels)
 
         # Generate texture
@@ -395,8 +421,8 @@ class CustomDrawData:
         bgl.glGenVertexArrays(1, self.vertex_array)
         bgl.glBindVertexArray(self.vertex_array[0])
 
-        texturecoord_location = bgl.glGetAttribLocation(shader_program[0], "texCoord");
-        position_location = bgl.glGetAttribLocation(shader_program[0], "pos");
+        texturecoord_location = bgl.glGetAttribLocation(shader_program[0], "texCoord")
+        position_location = bgl.glGetAttribLocation(shader_program[0], "pos")
 
         bgl.glEnableVertexAttribArray(texturecoord_location);
         bgl.glEnableVertexAttribArray(position_location);
